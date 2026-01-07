@@ -1,0 +1,1002 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{subcaption}
+\usepackage{bm}
+
+\geometry{margin=1in}
+
+% Code listing style
+\lstset{
+    language=Matlab,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{orange},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    breaklines=true
+}
+
+\title{Quadrotor Simulation with Differential Flatness Control\\and Motion Planning Module\\
+\large Based on Tal \& Karaman (2021)}
+
+\author{Technical Report}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report provides a comprehensive documentation of a quadrotor simulation implementing differential flatness-based trajectory tracking control following Tal \& Karaman (2021). The simulation features a 6-DOF quadrotor with cascaded control architecture using Incremental Nonlinear Dynamic Inversion (INDI). Additionally, a motion planning module has been developed to enable autonomous navigation through RRT-based path planning and minimum-snap trajectory generation. Three mission types are supported: point-to-point navigation, static obstacle avoidance, and dynamic replanning for pop-up threats.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Introduction}
+%=============================================================================
+
+This simulation implements the control architecture described in Tal \& Karaman (2021) \cite{tal2021}, which presents an accurate tracking method for aggressive quadrotor trajectories using incremental nonlinear dynamic inversion combined with differential flatness. The key contributions include:
+
+\begin{enumerate}
+    \item A cascaded control structure with position (outer) and attitude (inner) loops
+    \item Incremental control formulation that reduces model dependency
+    \item Differential flatness for computing feedforward angular velocity and acceleration
+    \item Extension with RRT-based motion planning for autonomous navigation
+\end{enumerate}
+
+\subsection{Coordinate System}
+
+The simulation uses the North-East-Down (NED) coordinate frame:
+\begin{itemize}
+    \item \textbf{Inertial Frame:} $\mathcal{I} = \{N, E, D\}$ with $D$ pointing downward
+    \item \textbf{Body Frame:} $\mathcal{B} = \{b_x, b_y, b_z\}$ with $b_x$ forward, $b_y$ right, $b_z$ down
+    \item \textbf{Position:} $\mathbf{x} = [N, E, D]^T$ (meters)
+    \item \textbf{Velocity:} $\mathbf{v} = [\dot{N}, \dot{E}, \dot{D}]^T$ (m/s)
+    \item \textbf{Attitude:} Quaternion $\mathbf{q} = [q_w, q_x, q_y, q_z]^T$ (body$\rightarrow$inertial)
+    \item \textbf{Angular Velocity:} $\boldsymbol{\Omega} = [p, q, r]^T$ (body frame, rad/s)
+\end{itemize}
+
+%=============================================================================
+\section{Quadrotor Dynamics}
+%=============================================================================
+
+\subsection{Translational Dynamics}
+
+The translational dynamics of the quadrotor in the inertial frame are given by Newton's second law:
+
+\begin{equation}
+m\ddot{\mathbf{x}} = m\mathbf{g} + \mathbf{f}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $m$ is the total mass of the quadrotor
+    \item $\mathbf{g} = [0, 0, g]^T$ is the gravitational acceleration vector in NED frame
+    \item $\mathbf{f}$ is the total thrust force expressed in the inertial frame
+\end{itemize}
+
+The thrust force is generated along the negative body $z$-axis and transformed to the inertial frame:
+
+\begin{equation}
+\mathbf{f} = -T \cdot \mathbf{b}_z = -T \cdot R\mathbf{e}_3
+\end{equation}
+
+where $T$ is the thrust magnitude, $R$ is the rotation matrix from body to inertial frame, and $\mathbf{e}_3 = [0, 0, 1]^T$.
+
+The acceleration in the inertial frame becomes:
+
+\begin{equation}
+\ddot{\mathbf{x}} = g\mathbf{e}_3 - \frac{T}{m}\mathbf{b}_z
+\label{eq:translational}
+\end{equation}
+
+\subsection{Rotational Dynamics}
+
+The rotational dynamics are governed by Euler's equation in the body frame:
+
+\begin{equation}
+J\dot{\boldsymbol{\Omega}} = \boldsymbol{\mu} - \boldsymbol{\Omega} \times J\boldsymbol{\Omega}
+\label{eq:rotational}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $J = \text{diag}(J_{xx}, J_{yy}, J_{zz})$ is the inertia tensor (assuming principal axes)
+    \item $\boldsymbol{\mu} = [\mu_x, \mu_y, \mu_z]^T$ is the control torque vector
+    \item $\boldsymbol{\Omega} \times J\boldsymbol{\Omega}$ is the gyroscopic coupling term
+\end{itemize}
+
+\subsection{Quaternion Kinematics}
+
+The attitude is represented using unit quaternions $\mathbf{q} = [q_w, q_x, q_y, q_z]^T$ with $\|\mathbf{q}\| = 1$. The quaternion derivative is:
+
+\begin{equation}
+\dot{\mathbf{q}} = \frac{1}{2}\mathbf{q} \otimes \begin{bmatrix} 0 \\ \boldsymbol{\Omega} \end{bmatrix}
+\label{eq:quaternion_kinematics}
+\end{equation}
+
+where $\otimes$ denotes quaternion multiplication. The rotation matrix from body to inertial frame is:
+
+\begin{equation}
+R(\mathbf{q}) = \begin{bmatrix}
+1 - 2(q_y^2 + q_z^2) & 2(q_x q_y - q_z q_w) & 2(q_x q_z + q_y q_w) \\
+2(q_x q_y + q_z q_w) & 1 - 2(q_x^2 + q_z^2) & 2(q_y q_z - q_x q_w) \\
+2(q_x q_z - q_y q_w) & 2(q_y q_z + q_x q_w) & 1 - 2(q_x^2 + q_y^2)
+\end{bmatrix}
+\end{equation}
+
+\subsection{Motor Model}
+
+Each motor is modeled as a first-order system with time constant $\tau_m$:
+
+\begin{equation}
+\dot{\omega}_i = \frac{1}{\tau_m}(\omega_{i,\text{cmd}} - \omega_i)
+\end{equation}
+
+The thrust and torque generated by motor $i$ are:
+
+\begin{align}
+T_i &= k_T \omega_i^2 \\
+\tau_i &= \pm k_M \omega_i^2
+\end{align}
+
+where $k_T$ is the thrust coefficient, $k_M$ is the moment coefficient, and the sign depends on the motor rotation direction.
+
+\subsection{Control Allocation}
+
+The relationship between motor speeds and the control inputs is given by the control effectiveness matrix $G_1$:
+
+\begin{equation}
+\begin{bmatrix} \mu_x \\ \mu_y \\ \mu_z \\ T \end{bmatrix} = G_1 \begin{bmatrix} \omega_1^2 \\ \omega_2^2 \\ \omega_3^2 \\ \omega_4^2 \end{bmatrix}
+\end{equation}
+
+For an X-configuration quadrotor with arm lengths $l_x$ and $l_y$:
+
+\begin{equation}
+G_1 = \begin{bmatrix}
+l_y k_T & -l_y k_T & -l_y k_T & l_y k_T \\
+l_x k_T & l_x k_T & -l_x k_T & -l_x k_T \\
+-k_M & k_M & -k_M & k_M \\
+k_T & k_T & k_T & k_T
+\end{bmatrix}
+\end{equation}
+
+The motor speed commands are obtained by inverting this relationship:
+
+\begin{equation}
+\boldsymbol{\omega}^2 = G_1^{-1} \begin{bmatrix} \boldsymbol{\mu}_{\text{cmd}} \\ T_{\text{cmd}} \end{bmatrix}
+\end{equation}
+
+with saturation limits $\omega_{\min} \leq \omega_i \leq \omega_{\max}$.
+
+%=============================================================================
+\section{Differential Flatness}
+%=============================================================================
+
+\subsection{Flat Outputs}
+
+A system is differentially flat if there exist outputs (flat outputs) such that all states and inputs can be expressed as functions of the flat outputs and their derivatives. For a quadrotor, the flat outputs are:
+
+\begin{equation}
+\boldsymbol{\sigma} = [\mathbf{x}^T, \psi]^T = [x, y, z, \psi]^T
+\end{equation}
+
+where $\mathbf{x}$ is the position and $\psi$ is the yaw angle.
+
+This means that given a trajectory $\boldsymbol{\sigma}(t)$ with sufficient derivatives, all states and inputs can be computed algebraically without integration.
+
+\subsection{Thrust Vector from Trajectory}
+
+From the translational dynamics (Eq. \ref{eq:translational}), the specific thrust vector (thrust per unit mass) is:
+
+\begin{equation}
+\boldsymbol{\tau} = \ddot{\mathbf{x}} - g\mathbf{e}_3 = -\frac{T}{m}\mathbf{b}_z
+\end{equation}
+
+The thrust magnitude is:
+
+\begin{equation}
+\tau = \|\boldsymbol{\tau}\| = \frac{T}{m}
+\end{equation}
+
+And the body $z$-axis direction is:
+
+\begin{equation}
+\mathbf{b}_z = -\frac{\boldsymbol{\tau}}{\tau} = -\frac{\ddot{\mathbf{x}} - g\mathbf{e}_3}{\|\ddot{\mathbf{x}} - g\mathbf{e}_3\|}
+\end{equation}
+
+\subsection{Attitude from Thrust and Yaw}
+
+Given the desired thrust direction $\mathbf{b}_z$ and yaw angle $\psi$, the complete rotation matrix is constructed as:
+
+\begin{align}
+\mathbf{b}_x &= \frac{[\cos\psi, \sin\psi, 0]^T \times \mathbf{b}_z}{\|[\cos\psi, \sin\psi, 0]^T \times \mathbf{b}_z\|} \times \mathbf{b}_z \\
+\mathbf{b}_y &= \mathbf{b}_z \times \mathbf{b}_x \\
+R &= [\mathbf{b}_x, \mathbf{b}_y, \mathbf{b}_z]
+\end{align}
+
+\subsection{Angular Velocity from Jerk (Equation 14)}
+
+Following Tal \& Karaman (2021), the angular velocity reference is computed from the jerk (third derivative of position). Define the matrices:
+
+\begin{equation}
+[\mathbf{i}_z]_\times = \begin{bmatrix} 0 & -1 & 0 \\ 1 & 0 & 0 \\ 0 & 0 & 0 \end{bmatrix}
+\end{equation}
+
+The yaw rate mapping matrix $S$ relates yaw rate to body rates:
+
+\begin{equation}
+S = \frac{1}{b_{x,1}^2 + b_{x,2}^2} \begin{bmatrix} -b_{x,2} & b_{x,1} \end{bmatrix} \begin{bmatrix} 0 & -b_{z,1} & b_{y,1} \\ 0 & -b_{z,2} & b_{y,2} \end{bmatrix}
+\end{equation}
+
+where $b_{x,i}$ denotes the $i$-th component of $\mathbf{b}_x$.
+
+The angular velocity reference $\boldsymbol{\Omega}_{\text{ref}}$ and thrust rate $\dot{\tau}$ are obtained by solving:
+
+\begin{equation}
+\begin{bmatrix}
+\tau R [\mathbf{i}_z]_\times^T & \mathbf{b}_z \\
+S & 0
+\end{bmatrix}
+\begin{bmatrix}
+\boldsymbol{\Omega}_{\text{ref}} \\
+\dot{\tau}
+\end{bmatrix}
+=
+\begin{bmatrix}
+\dddot{\mathbf{x}} \\
+\dot{\psi}
+\end{bmatrix}
+\label{eq:omega_ref}
+\end{equation}
+
+\subsection{Angular Acceleration from Snap (Equation 15)}
+
+The angular acceleration reference $\dot{\boldsymbol{\Omega}}_{\text{ref}}$ is computed from the snap (fourth derivative of position):
+
+\begin{equation}
+\begin{bmatrix}
+\tau R [\mathbf{i}_z]_\times^T & \mathbf{b}_z \\
+S & 0
+\end{bmatrix}
+\begin{bmatrix}
+\dot{\boldsymbol{\Omega}}_{\text{ref}} \\
+\ddot{\tau}
+\end{bmatrix}
+=
+\begin{bmatrix}
+\ddddot{\mathbf{x}} \\
+\ddot{\psi}
+\end{bmatrix}
+-
+\begin{bmatrix}
+R(2\dot{\tau}I + \tau[\boldsymbol{\Omega}]_\times)[\mathbf{i}_z]_\times^T \boldsymbol{\Omega} \\
+0
+\end{bmatrix}
+\label{eq:omega_dot_ref}
+\end{equation}
+
+where $[\boldsymbol{\Omega}]_\times$ is the skew-symmetric matrix of $\boldsymbol{\Omega}$.
+
+%=============================================================================
+\section{Control Architecture}
+%=============================================================================
+
+The control system uses a cascaded structure with an outer position loop and an inner attitude loop.
+
+\begin{equation}
+\text{Trajectory} \xrightarrow{\text{Position}} \mathbf{a}_c \xrightarrow{\text{Attitude}} \mathbf{q}_{\text{inc}} \xrightarrow{\text{Flatness}} (\boldsymbol{\Omega}_{\text{ref}}, \dot{\boldsymbol{\Omega}}_{\text{ref}}) \xrightarrow{\text{PD}} \boldsymbol{\alpha}_{\text{cmd}} \xrightarrow{\text{Motor}} \boldsymbol{\omega}_{\text{mot}}
+\end{equation}
+
+\subsection{Position Control (Outer Loop)}
+
+The position controller computes a commanded acceleration using PD control with acceleration feedforward (Equation 17 from \cite{tal2021}):
+
+\begin{equation}
+\mathbf{a}_c = K_x(\mathbf{x}_{\text{ref}} - \mathbf{x}) + K_v(\mathbf{v}_{\text{ref}} - \mathbf{v}) + K_a(\mathbf{a}_{\text{ref}} - \mathbf{a}_f) + \mathbf{a}_{\text{ref}}
+\label{eq:position_control}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $K_x = \text{diag}([18, 18, 13.5])$ - Position gain matrix
+    \item $K_v = \text{diag}([7.8, 7.8, 5.9])$ - Velocity gain matrix
+    \item $K_a = \text{diag}([0.5, 0.5, 0.3])$ - Acceleration gain matrix
+    \item $\mathbf{a}_f$ - Filtered acceleration (from accelerometer)
+\end{itemize}
+
+The acceleration filter is a first-order low-pass filter with cutoff frequency 30 Hz:
+
+\begin{equation}
+\dot{\mathbf{a}}_f = \frac{1}{\tau_f}(\mathbf{a}_{\text{meas}} - \mathbf{a}_f), \quad \tau_f = \frac{1}{2\pi \cdot 30}
+\end{equation}
+
+\subsection{Incremental Thrust Command}
+
+The incremental specific thrust command is computed as (Equations 19-21):
+
+\begin{equation}
+\boldsymbol{\tau}_{bz,c} = \boldsymbol{\tau}_{bz,f} + \mathbf{a}_c - \mathbf{a}_f
+\end{equation}
+
+where $\boldsymbol{\tau}_{bz,f}$ is the filtered specific thrust. The thrust command is:
+
+\begin{equation}
+T_{\text{cmd}} = m \|\boldsymbol{\tau}_{bz,c}\|
+\end{equation}
+
+\subsection{Incremental Attitude Command (Equations 22-26)}
+
+The attitude command is computed incrementally in the body frame. Given the current rotation matrix $R$ and desired thrust direction $\boldsymbol{\tau}_{bz,c}$:
+
+\textbf{Step 1:} Compute desired body $z$-axis in inertial frame:
+\begin{equation}
+\mathbf{b}_{z,\text{des}} = -\frac{\boldsymbol{\tau}_{bz,c}}{\|\boldsymbol{\tau}_{bz,c}\|}
+\end{equation}
+
+\textbf{Step 2:} Transform to body frame:
+\begin{equation}
+\mathbf{b}_{z,\text{des}}^B = R^T \mathbf{b}_{z,\text{des}}
+\end{equation}
+
+\textbf{Step 3:} Compute tilt quaternion (rotation from current $[0,0,1]^T$ to $\mathbf{b}_{z,\text{des}}^B$):
+\begin{equation}
+q_{\text{tilt}} = \frac{1}{\sqrt{2(1+d)}}\begin{bmatrix} \sqrt{2(1+d)}/2 \\ \mathbf{e}_3 \times \mathbf{b}_{z,\text{des}}^B \end{bmatrix}
+\end{equation}
+where $d = \mathbf{e}_3 \cdot \mathbf{b}_{z,\text{des}}^B$.
+
+\textbf{Step 4:} Compute yaw correction:
+\begin{equation}
+\psi_{\text{err}} = \psi_{\text{ref}} - \text{atan2}(R_{\text{new}}(2,1), R_{\text{new}}(1,1))
+\end{equation}
+
+\begin{equation}
+q_{\text{yaw}} = [\cos(\psi_{\text{err}}/2), 0, 0, \sin(\psi_{\text{err}}/2)]^T
+\end{equation}
+
+\textbf{Step 5:} Total incremental command:
+\begin{equation}
+q_{\text{inc}} = q_{\text{tilt}} \otimes q_{\text{yaw}}
+\end{equation}
+
+\subsection{Attitude Control (Inner Loop)}
+
+The attitude controller uses quaternion-based PD control with angular acceleration feedforward:
+
+\begin{equation}
+\boldsymbol{\alpha}_{\text{cmd}} = \dot{\boldsymbol{\Omega}}_{\text{ref}} + K_\xi \boldsymbol{\xi}_e + K_\omega(\boldsymbol{\Omega}_{\text{ref}} - \boldsymbol{\Omega})
+\label{eq:attitude_control}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $K_\xi = \text{diag}([175, 175, 82])$ - Attitude error gain
+    \item $K_\omega = 0.8 \cdot \text{diag}([19, 19.5, 19.2])$ - Angular rate gain
+    \item $\boldsymbol{\xi}_e$ - Attitude error in axis-angle representation
+\end{itemize}
+
+The attitude error is computed from the error quaternion:
+\begin{equation}
+q_e = q_{\text{cmd}} \otimes q^*
+\end{equation}
+
+where $q^*$ is the conjugate of the current quaternion. The axis-angle error is:
+\begin{equation}
+\boldsymbol{\xi}_e = 2 \arccos(q_{e,w}) \cdot \frac{\mathbf{q}_{e,v}}{\sin(\arccos(q_{e,w}))}
+\end{equation}
+
+\subsection{Torque Command}
+
+The body torque command is computed from the angular acceleration command:
+
+\begin{equation}
+\boldsymbol{\mu}_{\text{cmd}} = J\boldsymbol{\alpha}_{\text{cmd}} + \boldsymbol{\Omega} \times J\boldsymbol{\Omega}
+\end{equation}
+
+%=============================================================================
+\section{Yaw Planning}
+%=============================================================================
+
+Three yaw planning modes are implemented:
+
+\subsection{Constant Yaw}
+
+\begin{equation}
+\psi(t) = \psi_0, \quad \dot{\psi}(t) = 0, \quad \ddot{\psi}(t) = 0
+\end{equation}
+
+\subsection{Tangent Yaw}
+
+The yaw angle follows the velocity direction:
+
+\begin{equation}
+\psi(t) = \text{atan2}(v_E, v_N)
+\end{equation}
+
+The yaw rate is computed analytically:
+
+\begin{equation}
+\dot{\psi} = \frac{v_N a_E - v_E a_N}{v_N^2 + v_E^2}
+\end{equation}
+
+\subsection{Coordinated Yaw}
+
+Similar to tangent yaw but with smoothing for aggressive maneuvers.
+
+%=============================================================================
+\section{Motion Planning Module}
+%=============================================================================
+
+The motion planner extends the simulation with autonomous navigation capabilities.
+
+\subsection{System Architecture}
+
+\begin{table}[H]
+\centering
+\caption{Motion Planner Module Components}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Module} & \textbf{File} & \textbf{Function} \\
+\midrule
+Collision Checker & \texttt{collision\_checker.m} & Real-time collision detection \\
+Obstacle Manager & \texttt{obstacle\_manager.m} & Static/dynamic obstacle handling \\
+RRT Planner & \texttt{rrt\_planner.m} & Path planning algorithm \\
+Trajectory Smoother & \texttt{trajectory\_smoother.m} & Minimum-snap trajectory generation \\
+Waypoint Manager & \texttt{waypoint\_manager.m} & Mission sequencing and replanning \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Mission Types}
+
+\begin{enumerate}
+    \item \textbf{Task 1:} Point-to-point navigation without obstacles
+    \item \textbf{Task 2:} Navigation around static obstacles using RRT
+    \item \textbf{Task 3:} Dynamic replanning to avoid pop-up threats during flight
+\end{enumerate}
+
+%=============================================================================
+\section{Collision Detection}
+%=============================================================================
+
+\subsection{Sphere Obstacles}
+
+For a sphere obstacle centered at $\mathbf{c}$ with radius $r$, the signed distance from point $\mathbf{p}$ is:
+
+\begin{equation}
+d_{\text{sphere}}(\mathbf{p}) = \|\mathbf{p} - \mathbf{c}\| - r
+\end{equation}
+
+where $d < 0$ indicates the point is inside the obstacle.
+
+\subsection{Box Obstacles}
+
+For an axis-aligned box centered at $\mathbf{c}$ with half-dimensions $\mathbf{h} = [h_x, h_y, h_z]^T$:
+
+\begin{equation}
+d_{\text{box}}(\mathbf{p}) = \begin{cases}
+\|\max(\mathbf{d} - \mathbf{h}, \mathbf{0})\| & \text{if outside} \\
+-\min(h_i - d_i) & \text{if inside}
+\end{cases}
+\end{equation}
+
+where $\mathbf{d} = |\mathbf{p} - \mathbf{c}|$ (element-wise absolute value).
+
+\subsection{Safety Margin}
+
+A collision is detected when:
+\begin{equation}
+d(\mathbf{p}) < d_{\text{safety}}
+\end{equation}
+
+where $d_{\text{safety}} = 0.5$ m by default.
+
+%=============================================================================
+\section{RRT Path Planning}
+%=============================================================================
+
+\subsection{Algorithm Overview}
+
+The Rapidly-exploring Random Tree (RRT) algorithm builds a tree of feasible paths from the start position toward the goal by iteratively sampling random configurations and extending the nearest tree node toward them.
+
+\begin{algorithm}[H]
+\caption{RRT Path Planning}
+\begin{algorithmic}[1]
+\State Initialize tree $\mathcal{T}$ with $\mathbf{x}_{\text{start}}$
+\For{$i = 1$ to $N_{\max}$}
+    \If{$\text{rand}() < p_{\text{goal}}$}
+        \State $\mathbf{x}_{\text{rand}} \gets \mathbf{x}_{\text{goal}}$ \Comment{Goal bias}
+    \Else
+        \State $\mathbf{x}_{\text{rand}} \gets \text{SampleRandom}(\mathcal{W})$
+    \EndIf
+    \State $\mathbf{x}_{\text{near}} \gets \text{NearestNode}(\mathcal{T}, \mathbf{x}_{\text{rand}})$
+    \State $\mathbf{x}_{\text{new}} \gets \text{Extend}(\mathbf{x}_{\text{near}}, \mathbf{x}_{\text{rand}}, \Delta)$
+    \If{$\text{CollisionFree}(\mathbf{x}_{\text{near}}, \mathbf{x}_{\text{new}})$}
+        \State Add $\mathbf{x}_{\text{new}}$ to $\mathcal{T}$ with parent $\mathbf{x}_{\text{near}}$
+        \If{$\|\mathbf{x}_{\text{new}} - \mathbf{x}_{\text{goal}}\| < \epsilon_{\text{goal}}$}
+            \State \Return ExtractPath$(\mathcal{T}, \mathbf{x}_{\text{new}})$
+        \EndIf
+    \EndIf
+\EndFor
+\State \Return Failure
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Extension Function}
+
+The extend function moves from $\mathbf{x}_{\text{near}}$ toward $\mathbf{x}_{\text{rand}}$ by step size $\Delta$:
+
+\begin{equation}
+\mathbf{x}_{\text{new}} = \mathbf{x}_{\text{near}} + \min\left(\Delta, \|\mathbf{x}_{\text{rand}} - \mathbf{x}_{\text{near}}\|\right) \cdot \frac{\mathbf{x}_{\text{rand}} - \mathbf{x}_{\text{near}}}{\|\mathbf{x}_{\text{rand}} - \mathbf{x}_{\text{near}}\|}
+\end{equation}
+
+\subsection{Path Collision Check}
+
+For a path segment from $\mathbf{p}_1$ to $\mathbf{p}_2$, we sample points along the line:
+
+\begin{equation}
+\mathbf{p}(\alpha) = \mathbf{p}_1 + \alpha(\mathbf{p}_2 - \mathbf{p}_1), \quad \alpha \in [0, 1]
+\end{equation}
+
+with sampling interval $\Delta s = 0.1$ m, and check each point for collision.
+
+\subsection{RRT Parameters}
+
+\begin{table}[H]
+\centering
+\caption{RRT Planner Parameters}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Default Value} \\
+\midrule
+Maximum iterations & $N_{\max}$ & 5000 \\
+Step size & $\Delta$ & 0.5 m \\
+Goal bias probability & $p_{\text{goal}}$ & 0.15 \\
+Goal tolerance & $\epsilon_{\text{goal}}$ & 0.5 m \\
+Safety margin & $d_{\text{safety}}$ & 0.3 m \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Path Simplification}
+
+After finding a path, we simplify it by removing unnecessary waypoints while maintaining collision-free connectivity:
+
+\begin{algorithm}[H]
+\caption{Path Simplification}
+\begin{algorithmic}[1]
+\State $\mathcal{P}_{\text{simple}} \gets \{\mathbf{p}_1\}$
+\State $i \gets 1$
+\While{$i < |\mathcal{P}|$}
+    \State $j \gets |\mathcal{P}|$
+    \While{$j > i + 1$}
+        \If{CollisionFree$(\mathbf{p}_i, \mathbf{p}_j)$}
+            \State \textbf{break}
+        \EndIf
+        \State $j \gets j - 1$
+    \EndWhile
+    \State Add $\mathbf{p}_j$ to $\mathcal{P}_{\text{simple}}$
+    \State $i \gets j$
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+%=============================================================================
+\section{Minimum-Snap Trajectory Generation}
+%=============================================================================
+
+\subsection{Differential Flatness Requirements}
+
+For differential flatness-based control, the trajectory must provide derivatives up to snap:
+\begin{itemize}
+    \item Position: $\mathbf{x}(t)$
+    \item Velocity: $\dot{\mathbf{x}}(t)$
+    \item Acceleration: $\ddot{\mathbf{x}}(t)$
+    \item Jerk: $\dddot{\mathbf{x}}(t)$
+    \item Snap: $\ddddot{\mathbf{x}}(t)$
+\end{itemize}
+
+\subsection{Polynomial Representation}
+
+We use 7th-order polynomials for each segment, providing 8 degrees of freedom to satisfy boundary conditions. For normalized time $\tau \in [0, 1]$ within segment $k$:
+
+\begin{equation}
+p_k(\tau) = \sum_{i=0}^{7} c_{k,i} \tau^i = c_0 + c_1\tau + c_2\tau^2 + c_3\tau^3 + c_4\tau^4 + c_5\tau^5 + c_6\tau^6 + c_7\tau^7
+\end{equation}
+
+\subsection{Time Normalization}
+
+For a segment with duration $T$, the relationship between real time $t$ and normalized time $\tau$ is:
+
+\begin{equation}
+\tau = \frac{t - t_k}{T_k}, \quad t \in [t_k, t_k + T_k]
+\end{equation}
+
+Derivatives transform as:
+\begin{align}
+\dot{p}(t) &= \frac{1}{T} \frac{dp}{d\tau} \\
+\ddot{p}(t) &= \frac{1}{T^2} \frac{d^2p}{d\tau^2} \\
+\dddot{p}(t) &= \frac{1}{T^3} \frac{d^3p}{d\tau^3} \\
+\ddddot{p}(t) &= \frac{1}{T^4} \frac{d^4p}{d\tau^4}
+\end{align}
+
+\subsection{Boundary Conditions}
+
+For each segment, we enforce 8 boundary conditions (4 at each endpoint):
+
+\textbf{At $\tau = 0$:}
+\begin{align}
+p(0) &= c_0 = x_0 \\
+p'(0) &= c_1 = v_0 \cdot T \\
+p''(0) &= 2c_2 = a_0 \cdot T^2 \\
+p'''(0) &= 6c_3 = j_0 \cdot T^3
+\end{align}
+
+\textbf{At $\tau = 1$:}
+\begin{align}
+p(1) &= \sum_{i=0}^{7} c_i = x_1 \\
+p'(1) &= \sum_{i=1}^{7} i \cdot c_i = v_1 \cdot T \\
+p''(1) &= \sum_{i=2}^{7} i(i-1) \cdot c_i = a_1 \cdot T^2 \\
+p'''(1) &= \sum_{i=3}^{7} i(i-1)(i-2) \cdot c_i = j_1 \cdot T^3
+\end{align}
+
+\subsection{Matrix Formulation}
+
+The boundary conditions form a linear system $\mathbf{A}\mathbf{c} = \mathbf{b}$:
+
+\begin{equation}
+\begin{bmatrix}
+1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+0 & 1 & 0 & 0 & 0 & 0 & 0 & 0 \\
+0 & 0 & 2 & 0 & 0 & 0 & 0 & 0 \\
+0 & 0 & 0 & 6 & 0 & 0 & 0 & 0 \\
+1 & 1 & 1 & 1 & 1 & 1 & 1 & 1 \\
+0 & 1 & 2 & 3 & 4 & 5 & 6 & 7 \\
+0 & 0 & 2 & 6 & 12 & 20 & 30 & 42 \\
+0 & 0 & 0 & 6 & 24 & 60 & 120 & 210
+\end{bmatrix}
+\begin{bmatrix}
+c_0 \\ c_1 \\ c_2 \\ c_3 \\ c_4 \\ c_5 \\ c_6 \\ c_7
+\end{bmatrix}
+=
+\begin{bmatrix}
+x_0 \\
+v_0 T \\
+a_0 T^2 \\
+j_0 T^3 \\
+x_1 \\
+v_1 T \\
+a_1 T^2 \\
+j_1 T^3
+\end{bmatrix}
+\end{equation}
+
+\subsection{Segment Time Allocation}
+
+Segment times are allocated proportionally to segment distances with velocity constraints:
+
+\begin{equation}
+T_k = \max\left(\frac{d_k}{\sum_i d_i} \cdot T_{\text{total}}, \frac{d_k}{v_{\max}}\right)
+\end{equation}
+
+where $d_k = \|\mathbf{x}_{k+1} - \mathbf{x}_k\|$ is the segment distance.
+
+After applying constraints, times are renormalized:
+\begin{equation}
+T_k \gets T_k \cdot \frac{T_{\text{total}}}{\sum_i T_i}
+\end{equation}
+
+\subsection{Continuity Between Segments}
+
+For interior waypoints, we ensure $C^3$ continuity by matching:
+\begin{align}
+\mathbf{x}_{k}^- &= \mathbf{x}_{k}^+ & \text{(position)} \\
+\dot{\mathbf{x}}_{k}^- &= \dot{\mathbf{x}}_{k}^+ & \text{(velocity)} \\
+\ddot{\mathbf{x}}_{k}^- &= \ddot{\mathbf{x}}_{k}^+ & \text{(acceleration)} \\
+\dddot{\mathbf{x}}_{k}^- &= \dddot{\mathbf{x}}_{k}^+ & \text{(jerk)}
+\end{align}
+
+%=============================================================================
+\section{Dynamic Replanning}
+%=============================================================================
+
+\subsection{Pop-up Threat Detection}
+
+The obstacle manager maintains a list of threats with activation times:
+
+\begin{equation}
+\text{Obstacle } i \text{ active} \Leftrightarrow t \geq t_{\text{activate},i}
+\end{equation}
+
+\subsection{Replanning Trigger}
+
+Replanning is triggered when the remaining path collides with newly activated obstacles:
+
+\begin{algorithm}[H]
+\caption{Replan Check}
+\begin{algorithmic}[1]
+\For{each segment in remaining path}
+    \For{each sample point $\mathbf{p}$ along segment}
+        \If{$d(\mathbf{p}, \mathcal{O}_{\text{active}}) < d_{\text{safety}}$}
+            \State \Return NeedsReplan
+        \EndIf
+    \EndFor
+\EndFor
+\State \Return PathClear
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Smooth Transition During Replanning}
+
+To avoid discontinuities when replanning, we preserve the current kinematic state as initial conditions for the new trajectory:
+
+\begin{equation}
+\begin{aligned}
+\mathbf{x}_0^{\text{new}} &= \mathbf{x}(t_{\text{replan}}) \\
+\mathbf{v}_0^{\text{new}} &= \mathbf{v}(t_{\text{replan}}) \\
+\mathbf{a}_0^{\text{new}} &= \mathbf{a}(t_{\text{replan}})
+\end{aligned}
+\end{equation}
+
+This ensures $C^2$ continuity at the replan point, preventing the drone from stopping before following the new path.
+
+\subsection{Replanning Algorithm}
+
+\begin{algorithm}[H]
+\caption{Dynamic Replanning}
+\begin{algorithmic}[1]
+\Require Current state $(\mathbf{x}, \mathbf{v}, \mathbf{a})$, current time $t$, active obstacles $\mathcal{O}$
+\State $\mathbf{x}_{\text{start}} \gets \mathbf{x}$
+\State $\mathcal{P} \gets \text{RRT}(\mathbf{x}_{\text{start}}, \mathbf{x}_{\text{goal}}, \mathcal{O})$
+\If{RRT succeeds}
+    \State $\mathcal{P}_{\text{simple}} \gets \text{SimplifyPath}(\mathcal{P})$
+    \State $T_{\text{remain}} \gets \max(T_{\text{total}} - t, T_{\min})$
+    \State $\text{trajectory} \gets \text{MinSnapTraj}(\mathcal{P}_{\text{simple}}, T_{\text{remain}}, \mathbf{v}, \mathbf{a})$
+    \State Shift time base: $t_{\text{traj}} \gets t_{\text{traj}} + t$
+    \State \Return Success
+\Else
+    \State \Return Failure (continue on original path)
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+%=============================================================================
+\section{Simulation Parameters}
+%=============================================================================
+
+\subsection{Physical Parameters}
+
+\begin{table}[H]
+\centering
+\caption{Quadrotor Physical Parameters}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Value} & \textbf{Unit} \\
+\midrule
+Mass & $m$ & 1.0 & kg \\
+Inertia (x,y,z) & $J$ & diag([0.01, 0.01, 0.02]) & kg$\cdot$m$^2$ \\
+Arm length (x) & $l_x$ & 0.2 & m \\
+Arm length (y) & $l_y$ & 0.2 & m \\
+Thrust coefficient & $k_T$ & $1.0 \times 10^{-5}$ & N/(rad/s)$^2$ \\
+Moment coefficient & $k_M$ & $2.0 \times 10^{-6}$ & Nm/(rad/s)$^2$ \\
+Motor time constant & $\tau_m$ & 0.02 & s \\
+Gravitational acceleration & $g$ & 9.81 & m/s$^2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Control Gains}
+
+\begin{table}[H]
+\centering
+\caption{Control Gains (from Tal \& Karaman 2021, Table II)}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Gain} & \textbf{Symbol} & \textbf{Value} \\
+\midrule
+Position & $K_x$ & diag([18, 18, 13.5]) \\
+Velocity & $K_v$ & diag([7.8, 7.8, 5.9]) \\
+Acceleration & $K_a$ & diag([0.5, 0.5, 0.3]) \\
+Attitude & $K_\xi$ & diag([175, 175, 82]) \\
+Angular rate & $K_\omega$ & $0.8 \cdot$ diag([19, 19.5, 19.2]) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Simulation Settings}
+
+\begin{table}[H]
+\centering
+\caption{Simulation Settings}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Description} \\
+\midrule
+$dt$ & 0.002 s & Simulation timestep (500 Hz) \\
+$\omega_c$ & $2\pi \cdot 30$ rad/s & Filter cutoff frequency \\
+$\tau_f$ & 0.0053 s & Filter time constant \\
+$\omega_{\min}$ & 0 rad/s & Minimum motor speed \\
+$\omega_{\max}$ & $2.5 \cdot \omega_{\text{hover}}$ & Maximum motor speed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%=============================================================================
+\section{Results and Validation}
+%=============================================================================
+
+\subsection{Mission 1: Point-to-Point Navigation}
+
+\begin{itemize}
+    \item Start: $[0, 0, 0]$ m
+    \item Goal: $[10, 5, -3]$ m
+    \item Duration: Automatically calculated based on distance
+    \item Result: Drone reaches goal within 0.5 m tolerance
+\end{itemize}
+
+\subsection{Mission 2: Static Obstacle Avoidance}
+
+Three spherical obstacles are placed along the direct path:
+\begin{itemize}
+    \item Obstacle 1: Center $[5, 2, -2]$ m, radius 1.5 m
+    \item Obstacle 2: Center $[8, 4, -2.5]$ m, radius 1.2 m
+    \item Obstacle 3: Center $[10, 5, -1.5]$ m, radius 0.8 m
+\end{itemize}
+
+The RRT planner finds a collision-free path, and the drone maintains positive clearance from all obstacles throughout the flight.
+
+\subsection{Mission 3: Pop-up Threat Avoidance}
+
+\begin{itemize}
+    \item Initial path: Direct line from $[0, 0, -2]$ to $[15, 0, -2]$ m
+    \item Pop-up threat: Appears at $t = 4$ s at $[8, 0, -2]$ m with radius 2.0 m
+    \item Replanning: Triggered immediately upon threat detection
+    \item Smooth transition: Velocity and acceleration continuity maintained
+\end{itemize}
+
+%=============================================================================
+\section{Conclusion}
+%=============================================================================
+
+This report documents a comprehensive quadrotor simulation that combines:
+
+\begin{enumerate}
+    \item \textbf{6-DOF Dynamics:} Full translational and rotational dynamics with motor models
+    \item \textbf{Differential Flatness:} Algebraic computation of feedforward terms from trajectory derivatives
+    \item \textbf{INDI Control:} Incremental control formulation reducing model dependency
+    \item \textbf{Cascaded Architecture:} Outer position loop with inner attitude loop
+    \item \textbf{RRT Path Planning:} Efficient collision-free path generation
+    \item \textbf{Minimum-Snap Trajectories:} Smooth, differentiable trajectories for differential flatness
+    \item \textbf{Dynamic Replanning:} Real-time trajectory updates with kinematic continuity
+\end{enumerate}
+
+The implementation successfully demonstrates aggressive trajectory tracking and autonomous navigation capabilities for quadrotor systems.
+
+%=============================================================================
+\section*{References}
+%=============================================================================
+
+\begin{thebibliography}{9}
+
+\bibitem{tal2021}
+Tal, E., \& Karaman, S. (2021).
+\textit{Accurate Tracking of Aggressive Quadrotor Trajectories Using Incremental Nonlinear Dynamic Inversion and Differential Flatness}.
+IEEE Transactions on Control Systems Technology.
+
+\bibitem{mellinger2011}
+Mellinger, D., \& Kumar, V. (2011).
+\textit{Minimum Snap Trajectory Generation and Control for Quadrotors}.
+IEEE International Conference on Robotics and Automation (ICRA).
+
+\bibitem{lavalle1998}
+LaValle, S. M. (1998).
+\textit{Rapidly-Exploring Random Trees: A New Tool for Path Planning}.
+Technical Report, Computer Science Department, Iowa State University.
+
+\bibitem{smeur2016}
+Smeur, E. J. J., Chu, Q., \& de Croon, G. C. H. E. (2016).
+\textit{Adaptive Incremental Nonlinear Dynamic Inversion for Attitude Control of Micro Air Vehicles}.
+Journal of Guidance, Control, and Dynamics.
+
+\end{thebibliography}
+
+%=============================================================================
+\appendix
+\section{MATLAB Code Usage}
+%=============================================================================
+
+\subsection{Running the Original Demo}
+
+\begin{lstlisting}
+% In MATLAB, from test_rig directory:
+demo_indi_6dof_ned   % Original trajectory tracking
+\end{lstlisting}
+
+\subsection{Running the Mission Demos}
+
+\begin{lstlisting}
+% In MATLAB, from test_rig directory:
+demo_mission_1   % Point-to-point navigation
+demo_mission_2   % Static obstacle avoidance
+demo_mission_3   % Pop-up threat avoidance
+\end{lstlisting}
+
+Each demo saves an MP4 video of the flight animation.
+
+\subsection{Using the Motion Planner API}
+
+\begin{lstlisting}
+% Add motion planner to path
+addpath('motion_planner');
+
+% Create waypoint manager
+wm = waypoint_manager();
+
+% Define mission
+start_pos = [0; 0; -2];
+goal_pos = [10; 5; -3];
+obstacles = {struct('type', 'sphere', 'center', [5;2;-2], 'radius', 1.5)};
+bounds = struct('min', [-5;-5;-10], 'max', [15;10;0]);
+
+% Plan and generate trajectory
+wm.set_mission(start_pos, goal_pos, obstacles, bounds);
+[success, waypoints] = wm.plan_path();
+traj = wm.generate_trajectory(12.0);
+
+% Get reference at time t
+ref = wm.get_reference(t);
+\end{lstlisting}
+
+\subsection{Replanning with Velocity Continuity}
+
+\begin{lstlisting}
+% During simulation, when replanning is needed:
+current_vel = state.v;
+current_acc = filters.a_f;
+
+[success, new_traj] = wm.replan(state.x, t, obstacles, current_vel, current_acc);
+\end{lstlisting}
+
+%=============================================================================
+\section{Block Diagram}
+%=============================================================================
+
+The complete control system can be summarized as:
+
+\begin{verbatim}
++------------------+     +------------------+     +------------------+
+| Trajectory       | --> | Position Control | --> | Attitude Command |
+| x, v, a, j, s    |     | Eq. 17           |     | Eq. 22-26        |
++------------------+     +------------------+     +------------------+
+                                                          |
+                                                          v
++------------------+     +------------------+     +------------------+
+| Motor Commands   | <-- | Attitude Control | <-- | Flatness         |
+| omega_1..4       |     | Eq. PD           |     | Eq. 14-15        |
++------------------+     +------------------+     +------------------+
+                                                          |
+                                                          v
+                         +------------------+     +------------------+
+                         | 6-DOF Dynamics   | <-- | Motor Dynamics   |
+                         | Eq. 1-5          |     | 1st Order        |
+                         +------------------+     +------------------+
+\end{verbatim}
+
+\end{document}
