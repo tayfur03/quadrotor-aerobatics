@@ -74,16 +74,18 @@ fprintf('\n');
 %% Setup Waypoint Manager with Obstacles
 wm = waypoint_manager();
 
-% Configure RRT parameters
+% Configure RRT* parameters (use RRT* for better path quality in static environments)
+wm.rrt_params.algorithm = 'rrt_star';  % 'rrt' or 'rrt_star'
 wm.rrt_params.max_iter = 8000;
 wm.rrt_params.step_size = 0.4;
 wm.rrt_params.goal_bias = 0.15;
-wm.rrt_params.safety_margin = 0.5;  % Stay 0.5m away from obstacles
+wm.rrt_params.safety_margin = 0.5;    % Stay 0.5m away from obstacles
+wm.rrt_params.rewire_radius = 1.5;    % RRT* rewiring neighborhood
 
 wm.set_mission(start_pos, goal_pos, obstacles, bounds);
 
-% Plan path using RRT
-fprintf('Planning path with RRT...\n');
+% Plan path using RRT/RRT*
+fprintf('Planning path with %s...\n', upper(wm.rrt_params.algorithm));
 tic;
 [success, waypoints] = wm.plan_path();
 planning_time = toc;

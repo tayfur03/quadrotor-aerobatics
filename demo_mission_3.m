@@ -33,8 +33,9 @@ start_pos = [0; 0; -2];  % Starting at 2m altitude
 goal_pos = [15; 0; -2];
 
 % Pop-up threat configuration
-popup_time = 4.0;  % Threat appears at t=4.0 seconds
-popup_pos = [8; 0; -2];  % Appears in the middle of direct path
+% Threat placed further ahead to give drone time to react and replan
+popup_time = 4.0;  % Threat appears at t=3.0 seconds (earlier detection)
+popup_pos = [10; 0; -2];  % Appears further along path (was [8; 0; -2])
 popup_radius = 2.0;  % Large enough to require significant deviation
 
 % Workspace bounds for RRT replanning
@@ -64,11 +65,18 @@ fprintf('Obstacle manager initialized with 1 pop-up threat\n');
 %% Setup Initial Waypoint Manager (No Obstacles Initially)
 wm = waypoint_manager();
 
-% Configure RRT parameters for quick replanning
+% Configure RRT parameters for quick replanning (use standard RRT for speed)
+wm.rrt_params.algorithm = 'rrt_star';  % 'rrt' for fast replanning (vs 'rrt_star' for quality)
 wm.rrt_params.max_iter = 5000;
 wm.rrt_params.step_size = 0.5;
 wm.rrt_params.goal_bias = 0.2;
-wm.rrt_params.safety_margin = 0.6;
+wm.rrt_params.safety_margin = 0.8;  % Increased margin for better avoidance
+
+% Check RRT algorithm type and set wiring radius if using RRT*
+if strcmp(wm.rrt_params.algorithm, 'rrt_star')
+    wm.rrt_params.wiring_radius = 1.5;  % Set wiring radius for RRT*
+    fprintf('Wiring radius set to %.1f for RRT* algorithm\n', wm.rrt_params.wiring_radius);
+end
 
 % Plan initial path (no obstacles)
 wm.set_mission(start_pos, goal_pos, {}, bounds);
