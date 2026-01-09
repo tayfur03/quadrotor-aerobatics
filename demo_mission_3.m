@@ -102,6 +102,9 @@ has_replanned = false;
 replan_time = -1;
 pre_replan_waypoints = waypoints;
 
+% Saving video
+save_video = false;
+
 %% Main Simulation Loop with Dynamic Replanning
 fprintf('Running simulation with real-time replanning...\n');
 
@@ -230,7 +233,7 @@ plot_mission_results(log, params, goal_pos, active_obs, wm.waypoints, ...
 
 %% Animation
 animate_mission_popup(log, goal_pos, popup_pos, popup_radius, popup_time, ...
-    pre_replan_waypoints, wm.waypoints, replan_time);
+    pre_replan_waypoints, wm.waypoints, replan_time, save_video);
 
 %% ==================== LOCAL FUNCTIONS ====================
 

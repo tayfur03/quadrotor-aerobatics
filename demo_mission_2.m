@@ -121,6 +121,9 @@ N = round(Tf/dt);
 % Initialize logs
 log = init_log(N);
 
+% Saving video
+save_video = false;
+
 %% Main Simulation Loop
 fprintf('Running simulation...\n');
 
@@ -177,7 +180,7 @@ end
 plot_mission_results(log, params, goal_pos, obstacles, waypoints, 'Mission 2: Static Obstacle Avoidance');
 
 %% Animation
-animate_mission(log, goal_pos, obstacles, waypoints);
+animate_mission(log, goal_pos, obstacles, waypoints,save_video);
 
 %% ==================== LOCAL FUNCTIONS ====================
 
