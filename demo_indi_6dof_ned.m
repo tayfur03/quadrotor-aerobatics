@@ -5,7 +5,7 @@
 %     - INDI linear acceleration control (Eqs. 16–21)
 %     - Simple quaternion attitude PD
 %     - Ideal motors (no dynamics, only G1 mapping)
-
+clear; clc; close all;
 
 params = quad_params_indi();
 g   = params.g;
@@ -15,33 +15,13 @@ e3  = [0;0;1];
 tau_f = params.tau_f;
 
 dt = 0.002;       % [s]
-Tf = 16.0;        % Default simulation time [s] (will be overridden for vloop)
+Tf = 10.0;        % Default simulation time [s] (will be overridden for vloop)
 N  = round(Tf/dt);
 
 % State
 [state, motors, filters] = init_sim_state(params);
 
 %% Min Snap Poly Traj
-% waypoints = [0, 0, 0; 1, 1, -1; 2, 0, -2; 1, -1, -1; 0, 0, 0]'; % Define waypoints for the trajectory
-% timePoints = [0, 2, 4, 6, 8]; % Define time points corresponding to the waypoints
-% numSamples = N; % Number of samples to generate
-
-% waypoints = [0, 0, 0; 1, 1, -1; 0, 1, -1; -1, 1, -1; 0, 0, 0]'; % Define waypoints for the trajectory
-% timePoints = [0, 2, 4, 6, 8]; % Define time points corresponding to the waypoints
-% numSamples = N; % Number of samples to generate
-
-% waypoints = [0, 0, 0; 
-%              3, 0, 0;
-%              5, 0, 3;
-%              4, 0, 4;
-%              3, 0, 3;
-%              2, 0, 4;
-%              1, 0, 3;
-%              3, 0, 0]'; % Define waypoints for the trajectory
-% timePoints = [0, 2, 4, 6, 8, 10, 12, 14]; % Define time points corresponding to the waypoints
-% numSamples = N; % Number of samples to generate
-
-
 % figure;
 % empty = zeros(2,3);
 % plot(empty(1,:), empty(2,:), 'ro', 'MarkerSize', 10, 'DisplayName', 'Waypoints');
@@ -56,14 +36,67 @@ N  = round(Tf/dt);
 % waypoints = [pos(:,1)';zeros(1,size(pos,1)) ; pos(:,2)'];
 % timePoints = linspace(0, Tf, size(pos,1));
 % numSamples = N; % Number of samples to generate
-% 
+
+% Trial for barrel roll waypoints
+% waypoints = [0, 0, 0;
+%             0, 2, 0; 
+%             1, 4, 1; 
+%             0, 5, 2;
+%             -1, 6, 1;
+%             0, 7, 0;
+%             0, 9, 0]'; % Define waypoints for the trajectory
+% timePoints = [0,1,2,3,4,5,6]; % Define time points corresponding to the waypoints
+% numSamples = N; % Number of samples to generate
 % [xref,vref,aref,jref,sref] = minsnappolytraj(waypoints, timePoints, numSamples);
+
+% % Geometry
+% R = 5;   % Loop radius [m]
+% 
+% % Waypoints: n-by-p (3-by-5)
+% % Order: 0°, 90°, 180°, 270°, 360°
+% waypoints = [ ...
+%      0,   R,   0,  -R,   0 ;    % x
+%      0,   0,   0,   0,   0 ;    % y (fixed)
+%      0,   -R, -2*R,   -R,   0 ];   % z
+% 
+% % Time allocation (non-uniform)
+% timePoints = [0, 1.0, 2.4, 3.8, 5.0];   % [s]
+% 
+% % Tangent velocity definition
+% theta = deg2rad([0, 90, 180, 270, 360]);
+% v     = [6, 5, 3, 5, 6];   % Speed profile [m/s]
+% 
+% vx = v .* cos(theta);
+% vy = zeros(size(v));      % y velocity = 0
+% vz = - v .* sin(theta);
+% 
+% % Velocity BC: n-by-p (3-by-5)
+% VelocityBoundaryCondition = [ ...
+%     vx ;
+%     vy ;
+%     vz ];
+% 
+% % Acceleration Boundary Condition
+% AccelerationBoundaryCondition = nan(3,5);
+% 
+% % Enforce zero acceleration at key points
+% AccelerationBoundaryCondition(:,1) = [0; 0; 0];   % start
+% AccelerationBoundaryCondition(:,3) = [0; 0; 0];   % top
+% AccelerationBoundaryCondition(:,5) = [0; 0; 0];   % end
+% 
+% % Trajectory generation
+% numSamples = N;
+% 
+% [xref,vref,aref,jref,sref] = minsnappolytraj( ...
+%     waypoints, timePoints, numSamples, ...
+%     VelocityBoundaryCondition = VelocityBoundaryCondition, ...
+%     AccelerationBoundaryCondition = AccelerationBoundaryCondition );
 
 
 
 
 ref_params = params;
-ref_params.shape = "heart";
+ref_params.shape = "barrel_roll";
 ref_params.yaw = "constant";
 
 % Initialize logs (must be done after N is finalized)
@@ -71,7 +104,15 @@ log = init_log(N);
 
 for k = 1:N
     t = (k-1)*dt;
-    ref = reference_flat_outputs(t, ref_params);
+    ref.x = xref(:,k);
+    ref.v = vref(:,k);
+    ref.a = aref(:,k);
+    ref.j = jref(:,k);
+    ref.s = sref(:,k);
+    ref.psi = 0; % Assuming constant yaw for simplicity
+    ref.psi_dot = 0; % Assuming constant yaw rate for simplicity
+    ref.psi_ddot = 0; % Assuming constant yaw acceleration for simplicity
+    %ref = reference_flat_outputs(t, ref_params);
     [state, motors, filters, out] = sim_step(state, motors, filters, ref, params, dt);
     log = log_step(log, k, t, state, ref, out);
 end
@@ -167,8 +208,10 @@ state.v     = state.v + dt*v_dot;
 state.q     = quat_normalize(state.q + dt*q_dot);
 state.omega = state.omega + dt*omega_dot;
 
+
+% INDI Linear Acceleration and Yaw Control
 a_b = R' * (a_true - g*e3);
-a_meas = R*a_b + g*e3 + 0*rand(3,1);
+a_meas = R*a_b + g*e3 + 0.1*rand(3,1);
 filters.a_f = filters.a_f + (dt/params.tau_f) * (a_meas - filters.a_f);
 
 tau_bz = a_true - g*e3;
@@ -178,6 +221,7 @@ a_c = params.Kx*(ref.x - state.x) + params.Kv*(ref.v - state.v) + ...
     params.Ka*(ref.a - filters.a_f) + ref.a;
 
 tau_bz_c = filters.tau_bz_f + a_c - filters.a_f;
+
 
 tau_norm = norm(tau_bz_c);
 if tau_norm < 1e-6
@@ -374,28 +418,44 @@ if isfield(log, 'tau_norm')
     grid on;
 end
 
-if isfield(log, 'omega_mot_cmd')
+if isfield(log, 'omega_mot_cmd') || isfield(log, 'omega_mot')
     figure;
-    plot(t, log.omega_mot_cmd);
-    xlabel('t [s]');
-    ylabel('\omega_{mot,cmd} [rad/s]');
-    title('Motor Speed Commands');
-    legend('m1','m2','m3','m4');
-    grid on;
 
-    sat_mask = log.omega_mot_cmd >= params.omega_max * 0.999 | ...
-        log.omega_mot_cmd <= params.omega_min + 1e-6;
-    if any(sat_mask, 'all')
-        first_idx = find(any(sat_mask, 1), 1, 'first');
-        fprintf('Motor saturation begins at t=%.3f s\n', t(first_idx));
-    else
-        fprintf('No motor saturation detected.\n');
+    % Create a 2x1 subplot layout
+    subplot(2, 1, 1);
+    if isfield(log, 'omega_mot_cmd')
+        plot(t, log.omega_mot_cmd);
+        xlabel('t [s]');
+        ylabel('\omega_{mot,cmd} [rad/s]');
+        title('Motor Speed Commands');
+        legend('m1','m2','m3','m4');
+        grid on;
+
+        sat_mask = log.omega_mot_cmd >= params.omega_max * 0.999 | ...
+            log.omega_mot_cmd <= params.omega_min + 1e-6;
+        if any(sat_mask, 'all')
+            first_idx = find(any(sat_mask, 1), 1, 'first');
+            fprintf('Motor saturation begins at t=%.3f s\n', t(first_idx));
+        else
+            fprintf('No motor saturation detected.\n');
+        end
+
+        max_cmd = max(log.omega_mot_cmd, [], 'all');
+        min_cmd = min(log.omega_mot_cmd, [], 'all');
+        fprintf('Motor cmd range: [%.1f, %.1f] rad/s (limits [%.1f, %.1f])\n', ...
+            min_cmd, max_cmd, params.omega_min, params.omega_max);
     end
 
-    max_cmd = max(log.omega_mot_cmd, [], 'all');
-    min_cmd = min(log.omega_mot_cmd, [], 'all');
-    fprintf('Motor cmd range: [%.1f, %.1f] rad/s (limits [%.1f, %.1f])\n', ...
-        min_cmd, max_cmd, params.omega_min, params.omega_max);
+    % Plot motor speeds if available
+    if isfield(log, 'omega_mot')
+        subplot(2, 1, 2);
+        plot(t, log.omega_mot);
+        xlabel('t [s]');
+        ylabel('\omega_{mot} [rad/s]');
+        title('Motor Speeds');
+        legend('m1','m2','m3','m4');
+        grid on;
+    end
 end
 
 if isfield(log, 'T_cmd')
@@ -467,15 +527,15 @@ phi   = atan2(R(3,2), R(3,3));
 psi   = atan2(R(2,1), R(1,1));
 end
 
-function S = euler_rate_matrix(phi, theta)
-%EULER_RATE_MATRIX  Matrix S such that xi_dot = S * Omega.
-%   xi_dot = [phi_dot; theta_dot; psi_dot]
-%   Omega  = [p; q; r]
-
-S = [ 1,  sin(phi)*tan(theta),  cos(phi)*tan(theta);
-      0,  cos(phi),           -sin(phi);
-      0,  sin(phi)/cos(theta), 0];
-end
+% function S = euler_rate_matrix(phi, theta)
+% %EULER_RATE_MATRIX  Matrix S such that xi_dot = S * Omega.
+% %   xi_dot = [phi_dot; theta_dot; psi_dot]
+% %   Omega  = [p; q; r]
+% 
+% S = [ 1,  sin(phi)*tan(theta),  cos(phi)*tan(theta);
+%       0,  cos(phi),           -sin(phi);
+%       0,  sin(phi)/cos(theta), 0];
+% end
 
 
 function q_inc = compute_incremental_attitude_cmd(R_curr, tau_bz_c, psi_ref)

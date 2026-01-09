@@ -9,7 +9,7 @@ function [x_ref, v_ref, a_ref, j_ref, s_ref, psi_ref, psi_dot_ref, psi_ddot_ref]
     % =========================
     % User-tunable trajectory params
     % =========================
-    Tf   = 16.0;              % total duration [s]
+    Tf   = 8.0;              % total duration [s]
     A    = 5;                 % horizontal size [m] (Roulette modunda scale faktor olarak kullanilir)
     D0   = 0.5;               % base Down offset [m]
     Dz   = 1;                 % vertical oscillation amplitude [m]
@@ -182,6 +182,29 @@ function [x_ref, v_ref, a_ref, j_ref, s_ref, psi_ref, psi_dot_ref, psi_ddot_ref]
             % 4th Derivative
             d4N_dth4 = A_roulette * ( r1*k1^4*c1 + r2*k2^4*c2 + r3*k3^4*s3);
             d4E_dth4 = A_roulette * ( r4*k1^4*s1 + r5*k2^4*s2 + r6*k3^4*c3);
+        case "barrel_roll"
+            % Needs cruise flight before that manuever
+            A = 1;
+            N_th = 2*th;
+            E_th = -1 + A*cos(th);
+            D_th = - A*sin(th);
+
+            % Derivatives wrt th 
+            dN_dth = 5;
+            dE_dth = -A*sin(th);
+            dD_dth = -A*cos(th);
+
+            d2N_dth2 = 0;
+            d2E_dth2 = -A*cos(th);
+            d2D_dth2 = A*sin(th);
+
+            d3N_dth3 = 0;
+            d3E_dth3 = A*sin(th);
+            d3D_dth3 = A*cos(th);
+
+            d4N_dth4 = 0;
+            d4E_dth4 = A*cos(th);
+            d4D_dth4 = -A*sin(th);
 
         otherwise
             error("Unknown shape. Use ""eight"", ""heart"" or ""roulette"".");
@@ -190,11 +213,13 @@ function [x_ref, v_ref, a_ref, j_ref, s_ref, psi_ref, psi_dot_ref, psi_ddot_ref]
     % =========================
     % Vertical (Down) profile
     % =========================
-    D_th = D0 + Dz * (1 - cos(th)) / 2;
-    dD_dth   = Dz * (sin(th)) / 2;
-    d2D_dth2 = Dz * (cos(th)) / 2;
-    d3D_dth3 = -Dz * (sin(th)) / 2;
-    d4D_dth4 = -Dz * (cos(th)) / 2;
+    if ~strcmp(shape, "barrel_roll")
+        D_th = D0 + Dz * (1 - cos(th)) / 2;
+        dD_dth   = Dz * (sin(th)) / 2;
+        d2D_dth2 = Dz * (cos(th)) / 2;
+        d3D_dth3 = -Dz * (sin(th)) / 2;
+        d4D_dth4 = -Dz * (cos(th)) / 2;
+    end
 
     % =========================
     % Chain rule: x(th(t)) -> Snap Calculation
