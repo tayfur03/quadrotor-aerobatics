@@ -2,19 +2,32 @@ function [x_ref, v_ref, a_ref, j_ref, s_ref, psi_ref, psi_dot_ref, psi_ddot_ref]
 %FLAT_OUTPUTS_DEMO  Smooth 3D trajectory (single param), with derivatives.
 % NED frame: x = [N; E; D], D is positive downward.
 %
+% Uses yaw_planner() for yaw reference generation.
+%
+% Inputs:
+%   t      - Current time [s]
+%   params - Struct with fields:
+%            .shape         - "eight", "heart", "roulette", or "barrel_roll"
+%            .yaw           - Yaw mode: "constant", "tangent", "coordinated",
+%                             "constant_rate", "knife_edge", "poi"
+%            .psi_ref_const - (optional) Constant yaw angle [rad]
+%            .yaw_params    - (optional) Additional yaw params for yaw_planner
+%            .traj          - (optional) Trajectory overrides
+%            .roulette      - (optional) Roulette curve parameters
+%
 % Outputs:
-%   x_ref, v_ref, a_ref, j_ref : [3x1] each
+%   x_ref, v_ref, a_ref, j_ref, s_ref : [3x1] each (position to snap)
 %   psi_ref, psi_dot_ref, psi_ddot_ref : yaw references
 
     % =========================
     % User-tunable trajectory params
     % =========================
-    Tf   = 8.0;              % total duration [s]
+    Tf   = params.Tf;              % total duration [s]
     A    = 5;                 % horizontal size [m] (Roulette modunda scale faktor olarak kullanilir)
     D0   = 0.5;               % base Down offset [m]
     Dz   = 1;                 % vertical oscillation amplitude [m]
-    shape = params.shape ;    % "eight", "heart" or "roulette"
-    yaw = params.yaw ;
+    shape = params.shape ;    % "eight", "heart", "roulette", or "barrel_roll"
+    yaw_mode = params.yaw ;   % yaw mode for yaw_planner
     cycles = 1.0;             % number of loops within Tf (can be 1, 1.5, 2, ...)
 
     % Optional trajectory overrides:
@@ -43,11 +56,13 @@ function [x_ref, v_ref, a_ref, j_ref, s_ref, psi_ref, psi_dot_ref, psi_ddot_ref]
     elseif shape == "roulette" && use_paper_time
         A_roulette = 1.0;
     end
-    % Persistent yaw for unwrap continuity across calls.
+    % Persistent yaw for unwrap continuity across calls (used by yaw_planner)
     persistent last_psi_persist;
     if isempty(last_psi_persist)
         if isfield(params, 'psi_ref_const')
             last_psi_persist = params.psi_ref_const;
+        elseif isfield(params, 'yaw_params') && isfield(params.yaw_params, 'psi_initial')
+            last_psi_persist = params.yaw_params.psi_initial;
         else
             last_psi_persist = 0.0;
         end
@@ -55,6 +70,8 @@ function [x_ref, v_ref, a_ref, j_ref, s_ref, psi_ref, psi_dot_ref, psi_ddot_ref]
     if isfield(params, 'reset_yaw') && params.reset_yaw
         if isfield(params, 'psi_ref_const')
             last_psi_persist = params.psi_ref_const;
+        elseif isfield(params, 'yaw_params') && isfield(params.yaw_params, 'psi_initial')
+            last_psi_persist = params.yaw_params.psi_initial;
         else
             last_psi_persist = 0.0;
         end
@@ -62,6 +79,8 @@ function [x_ref, v_ref, a_ref, j_ref, s_ref, psi_ref, psi_dot_ref, psi_ddot_ref]
     if t <= 0
         if isfield(params, 'psi_ref_const')
             last_psi_persist = params.psi_ref_const;
+        elseif isfield(params, 'yaw_params') && isfield(params.yaw_params, 'psi_initial')
+            last_psi_persist = params.yaw_params.psi_initial;
         else
             last_psi_persist = 0.0;
         end
@@ -260,51 +279,82 @@ function [x_ref, v_ref, a_ref, j_ref, s_ref, psi_ref, psi_dot_ref, psi_ddot_ref]
     s_ref = [N_snap; E_snap; D_snap];
 
     % =========================
-    % Yaw reference with Continuity (Unwrap)
+    % Yaw reference using yaw_planner
     % =========================
-    switch yaw
-        case "constant"
-            psi_ref      = params.psi_ref_const;
-            psi_dot_ref  = 0.0;
-            psi_ddot_ref = 0.0;
-            last_psi_persist = psi_ref;
-            
+
+    % Build state_ref struct for yaw_planner
+    state_ref = struct();
+    state_ref.pos = x_ref;
+    state_ref.v = v_ref;
+    state_ref.a = a_ref;
+
+    % Build yaw_params struct for yaw_planner
+    yaw_params = struct();
+    yaw_params.last_psi = last_psi_persist;
+
+    % Map legacy yaw mode names to yaw_planner modes
+    switch lower(yaw_mode)
         case "align"
-            vx = v_ref(1);
-            vy = v_ref(2);
-            ax = a_ref(1);
-            ay = a_ref(2);
-            
-            v_sq = vx^2 + vy^2;
-            
-            % Hedef açı (Tangent)
-            if v_sq > 1e-6
-                target_psi = atan2(vy, vx);
-            else
-                target_psi = last_psi_persist;
-            end
-            
-            % --- YAW UNWRAP LOGIC ---
-            % Eğer params içinde bir önceki psi değeri varsa onu kullanarak süreklilik sağla
-            diff = target_psi - last_psi_persist;
-            while diff > pi,  diff = diff - 2*pi; end
-            while diff < -pi, diff = diff + 2*pi; end
-            
-            psi_ref = last_psi_persist + diff;
-            last_psi_persist = psi_ref;
-            
-            % Yaw Rate (Feedforward)
-            if v_sq > 1e-4
-                psi_dot_ref = (vx*ay - vy*ax) / v_sq;
-            else
-                psi_dot_ref = 0;
-            end
-            
-            psi_ddot_ref = 0.0; % İhmal edildi
-            
+            % Legacy "align" mode maps to "tangent" (horizontal velocity alignment)
+            actual_yaw_mode = "tangent";
         otherwise
-            error("Unknown yaw option. Use ""constant"" or ""align"".");
+            actual_yaw_mode = yaw_mode;
     end
+
+    % Handle constant yaw: use psi_ref_const if provided
+    if strcmpi(actual_yaw_mode, "constant")
+        if isfield(params, 'psi_ref_const')
+            yaw_params.psi_constant = params.psi_ref_const;
+        else
+            yaw_params.psi_constant = 0;
+        end
+    end
+
+    % Handle constant_rate: use yaw_params if provided
+    if strcmpi(actual_yaw_mode, "constant_rate")
+        if isfield(params, 'yaw_params') && isfield(params.yaw_params, 'psi_rate')
+            yaw_params.psi_rate = params.yaw_params.psi_rate;
+        else
+            yaw_params.psi_rate = pi/2;  % Default: 90 deg/s
+        end
+        if isfield(params, 'yaw_params') && isfield(params.yaw_params, 'psi_initial')
+            yaw_params.psi_initial = params.yaw_params.psi_initial;
+        elseif isfield(params, 'psi_ref_const')
+            yaw_params.psi_initial = params.psi_ref_const;
+        else
+            yaw_params.psi_initial = 0;
+        end
+    end
+
+    % Handle POI mode
+    if strcmpi(actual_yaw_mode, "poi")
+        if isfield(params, 'yaw_params') && isfield(params.yaw_params, 'poi')
+            yaw_params.poi = params.yaw_params.poi;
+        end
+    end
+
+    % Handle knife_edge mode
+    if strcmpi(actual_yaw_mode, "knife_edge")
+        if isfield(params, 'yaw_params') && isfield(params.yaw_params, 'knife_edge_dir')
+            yaw_params.knife_edge_dir = params.yaw_params.knife_edge_dir;
+        end
+    end
+
+    % Merge any additional yaw_params from input
+    if isfield(params, 'yaw_params')
+        fnames = fieldnames(params.yaw_params);
+        for i = 1:length(fnames)
+            if ~isfield(yaw_params, fnames{i})
+                yaw_params.(fnames{i}) = params.yaw_params.(fnames{i});
+            end
+        end
+    end
+
+    % Call yaw_planner
+    [psi_ref, psi_dot_ref, psi_ddot_ref] = yaw_planner(t, actual_yaw_mode, state_ref, yaw_params);
+
+    % Update persistent for continuity
+    last_psi_persist = psi_ref;
 end
 
 function [s, s1, s2, s3, s4] = s_curve_c3(tau)

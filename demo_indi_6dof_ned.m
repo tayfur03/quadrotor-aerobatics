@@ -4,7 +4,7 @@
 %     - NED frame (x=[N;E;D])
 %     - INDI linear acceleration control (Eqs. 16–21)
 %     - Simple quaternion attitude PD
-%     - Ideal motors (no dynamics, only G1 mapping)
+
 clear; clc; close all;
 
 params = quad_params_indi();
@@ -15,7 +15,7 @@ e3  = [0;0;1];
 tau_f = params.tau_f;
 
 dt = 0.002;       % [s]
-Tf = 10.0;        % Default simulation time [s] (will be overridden for vloop)
+Tf = 12.0;        % Default simulation time [s] (will be overridden for vloop)
 N  = round(Tf/dt);
 
 % State
@@ -28,10 +28,10 @@ N  = round(Tf/dt);
 % hold on; grid on; xlabel('North [m]'); ylabel('Down [m]');
 % axis([-10, 10, -10, 10])
 % title('Draw a polyline. Double-click to finish.');
-% 
+%
 % h = drawpolyline('Color','b');        % user draws and double-clicks to finish
 % pos = h.Position;                     % M-by-2 array of [x y] points
-% 
+%
 % % waypoints = [pos(:,1)'; pos(:,2)'; zeros(1,size(pos,1))];
 % waypoints = [pos(:,1)';zeros(1,size(pos,1)) ; pos(:,2)'];
 % timePoints = linspace(0, Tf, size(pos,1));
@@ -39,8 +39,8 @@ N  = round(Tf/dt);
 
 % Trial for barrel roll waypoints
 % waypoints = [0, 0, 0;
-%             0, 2, 0; 
-%             1, 4, 1; 
+%             0, 2, 0;
+%             1, 4, 1;
 %             0, 5, 2;
 %             -1, 6, 1;
 %             0, 7, 0;
@@ -51,42 +51,42 @@ N  = round(Tf/dt);
 
 % % Geometry
 % R = 5;   % Loop radius [m]
-% 
+%
 % % Waypoints: n-by-p (3-by-5)
 % % Order: 0°, 90°, 180°, 270°, 360°
 % waypoints = [ ...
 %      0,   R,   0,  -R,   0 ;    % x
 %      0,   0,   0,   0,   0 ;    % y (fixed)
 %      0,   -R, -2*R,   -R,   0 ];   % z
-% 
+%
 % % Time allocation (non-uniform)
 % timePoints = [0, 1.0, 2.4, 3.8, 5.0];   % [s]
-% 
+%
 % % Tangent velocity definition
 % theta = deg2rad([0, 90, 180, 270, 360]);
 % v     = [6, 5, 3, 5, 6];   % Speed profile [m/s]
-% 
+%
 % vx = v .* cos(theta);
 % vy = zeros(size(v));      % y velocity = 0
 % vz = - v .* sin(theta);
-% 
+%
 % % Velocity BC: n-by-p (3-by-5)
 % VelocityBoundaryCondition = [ ...
 %     vx ;
 %     vy ;
 %     vz ];
-% 
+%
 % % Acceleration Boundary Condition
 % AccelerationBoundaryCondition = nan(3,5);
-% 
+%
 % % Enforce zero acceleration at key points
 % AccelerationBoundaryCondition(:,1) = [0; 0; 0];   % start
 % AccelerationBoundaryCondition(:,3) = [0; 0; 0];   % top
 % AccelerationBoundaryCondition(:,5) = [0; 0; 0];   % end
-% 
+%
 % % Trajectory generation
 % numSamples = N;
-% 
+%
 % [xref,vref,aref,jref,sref] = minsnappolytraj( ...
 %     waypoints, timePoints, numSamples, ...
 %     VelocityBoundaryCondition = VelocityBoundaryCondition, ...
@@ -94,25 +94,26 @@ N  = round(Tf/dt);
 
 
 
-
+params.Tf = Tf;
 ref_params = params;
-ref_params.shape = "barrel_roll";
-ref_params.yaw = "constant";
+ref_params.shape = "eight";
+ref_params.yaw = "align";
+
 
 % Initialize logs (must be done after N is finalized)
 log = init_log(N);
 
 for k = 1:N
     t = (k-1)*dt;
-    ref.x = xref(:,k);
-    ref.v = vref(:,k);
-    ref.a = aref(:,k);
-    ref.j = jref(:,k);
-    ref.s = sref(:,k);
-    ref.psi = 0; % Assuming constant yaw for simplicity
-    ref.psi_dot = 0; % Assuming constant yaw rate for simplicity
-    ref.psi_ddot = 0; % Assuming constant yaw acceleration for simplicity
-    %ref = reference_flat_outputs(t, ref_params);
+    % ref.x = xref(:,k);
+    % ref.v = vref(:,k);
+    % ref.a = aref(:,k);
+    % ref.j = jref(:,k);
+    % ref.s = sref(:,k);
+    % ref.psi = 0; % Assuming constant yaw for simplicity
+    % ref.psi_dot = 0; % Assuming constant yaw rate for simplicity
+    % ref.psi_ddot = 0; % Assuming constant yaw acceleration for simplicity
+    ref = reference_flat_outputs(t, ref_params);
     [state, motors, filters, out] = sim_step(state, motors, filters, ref, params, dt);
     log = log_step(log, k, t, state, ref, out);
 end
@@ -531,7 +532,7 @@ end
 % %EULER_RATE_MATRIX  Matrix S such that xi_dot = S * Omega.
 % %   xi_dot = [phi_dot; theta_dot; psi_dot]
 % %   Omega  = [p; q; r]
-% 
+%
 % S = [ 1,  sin(phi)*tan(theta),  cos(phi)*tan(theta);
 %       0,  cos(phi),           -sin(phi);
 %       0,  sin(phi)/cos(theta), 0];
@@ -546,79 +547,79 @@ function q_inc = compute_incremental_attitude_cmd(R_curr, tau_bz_c, psi_ref)
 %
 %   Output: q_inc (Rotation command to be applied in the Body Frame)
 
-    % 1. Desired Thrust Direction (Inertial Frame)
-    % The thrust vector (tau_bz_c) is typically in the [N, E, D] axes.
-    % The drone's thrust is in the opposite direction of the Z axis (-bz).
-    t_norm = norm(tau_bz_c);
-    if t_norm < 1e-6
-        t_des_in = [0;0;-1]; % Hover (Upward thrust)
-    else
-        t_des_in = tau_bz_c / t_norm; % Acceleration direction
-    end
-    
-    % The thrust direction must be the OPPOSITE of the Body Z axis (-b_z).
-    % That is, the target Body Z axis (in the Inertial frame):
-    bz_des_in = -t_des_in; 
+% 1. Desired Thrust Direction (Inertial Frame)
+% The thrust vector (tau_bz_c) is typically in the [N, E, D] axes.
+% The drone's thrust is in the opposite direction of the Z axis (-bz).
+t_norm = norm(tau_bz_c);
+if t_norm < 1e-6
+    t_des_in = [0;0;-1]; % Hover (Upward thrust)
+else
+    t_des_in = tau_bz_c / t_norm; % Acceleration direction
+end
 
-    % 2. Transform the target Body Z to the CURRENT Body Frame (according to Eq. 22)
-    % bz_des_body = R_curr' * bz_des_in
-    bz_des_body = R_curr' * bz_des_in;
+% The thrust direction must be the OPPOSITE of the Body Z axis (-b_z).
+% That is, the target Body Z axis (in the Inertial frame):
+bz_des_in = -t_des_in;
 
-    % 3. Tilt Rotation (Eq. 23 - Vector Alignment)
-    % The difference between the current Body Z ([0;0;1]) and the target Body Z (bz_des_body).
-    % This operation provides the "Tilt" correction.
-    
-    current_z = [0;0;1];
-    
-    % Quaternion for rotation between two vectors (Shortest Arc)
-    % q = [dot + sqrt(len1*len2), cross]
-    cross_prod = cross(current_z, bz_des_body);
-    dot_prod   = dot(current_z, bz_des_body);
-    
-    % Singularity protection (if looking in the exact opposite direction)
-    if dot_prod < -0.9999
-        % 180 degree rotation (around the X axis)
-        q_tilt = [0; 1; 0; 0]; 
-    else
-        s = sqrt(2 * (1 + dot_prod));
-        q_tilt = [0.5 * s; cross_prod / s];
-    end
-    q_tilt = quat_normalize(q_tilt);
+% 2. Transform the target Body Z to the CURRENT Body Frame (according to Eq. 22)
+% bz_des_body = R_curr' * bz_des_in
+bz_des_body = R_curr' * bz_des_in;
 
-    % 4. Yaw (Drift) Correction (Eq. 24-25)
-    % The intermediate orientation after applying the tilt correction
-    R_tilt = quat_to_R(q_tilt);
-    
-    % Where is the X axis looking in this intermediate orientation?
-    bx_inter = R_tilt(:,1); % New X in the Body frame
-    
-    % How much more do we need to turn in the "Body Frame" according to the desired Yaw angle (psi_ref)?
-    
-    % Current Heading (Inertial)
-    % The operation R_curr * R_tilt gives the new stance in the Inertial frame.
-    R_new_in = R_curr * R_tilt;
-    
-    % Current Yaw angle (from R_new_in)
-    psi_curr = atan2(R_new_in(2,1), R_new_in(1,1));
-    
-    % Yaw Error (via the shortest path)
-    psi_err = psi_ref - psi_curr;
-    while psi_err > pi,  psi_err = psi_err - 2*pi; end
-    while psi_err < -pi, psi_err = psi_err + 2*pi; end
-    
-    % Yaw rotation (around the Z axis)
-    q_yaw = [cos(psi_err/2); 0; 0; sin(psi_err/2)];
-    
-    % 5. Total Incremental Command (Eq. 26)
-    % First Tilt, then Yaw (or the order may change according to frame definition,
-    % here we are doing body-intrinsic rotation: q_inc = q_tilt * q_yaw)
-    
-    q_inc = quat_mul(q_tilt, q_yaw);
-    
-    % Make the scalar part of q_inc positive (to prevent singularity)
-    if q_inc(1) < 0
-        q_inc = -q_inc;
-    end
+% 3. Tilt Rotation (Eq. 23 - Vector Alignment)
+% The difference between the current Body Z ([0;0;1]) and the target Body Z (bz_des_body).
+% This operation provides the "Tilt" correction.
+
+current_z = [0;0;1];
+
+% Quaternion for rotation between two vectors (Shortest Arc)
+% q = [dot + sqrt(len1*len2), cross]
+cross_prod = cross(current_z, bz_des_body);
+dot_prod   = dot(current_z, bz_des_body);
+
+% Singularity protection (if looking in the exact opposite direction)
+if dot_prod < -0.9999
+    % 180 degree rotation (around the X axis)
+    q_tilt = [0; 1; 0; 0];
+else
+    s = sqrt(2 * (1 + dot_prod));
+    q_tilt = [0.5 * s; cross_prod / s];
+end
+q_tilt = quat_normalize(q_tilt);
+
+% 4. Yaw (Drift) Correction (Eq. 24-25)
+% The intermediate orientation after applying the tilt correction
+R_tilt = quat_to_R(q_tilt);
+
+% Where is the X axis looking in this intermediate orientation?
+bx_inter = R_tilt(:,1); % New X in the Body frame
+
+% How much more do we need to turn in the "Body Frame" according to the desired Yaw angle (psi_ref)?
+
+% Current Heading (Inertial)
+% The operation R_curr * R_tilt gives the new stance in the Inertial frame.
+R_new_in = R_curr * R_tilt;
+
+% Current Yaw angle (from R_new_in)
+psi_curr = atan2(R_new_in(2,1), R_new_in(1,1));
+
+% Yaw Error (via the shortest path)
+psi_err = psi_ref - psi_curr;
+while psi_err > pi,  psi_err = psi_err - 2*pi; end
+while psi_err < -pi, psi_err = psi_err + 2*pi; end
+
+% Yaw rotation (around the Z axis)
+q_yaw = [cos(psi_err/2); 0; 0; sin(psi_err/2)];
+
+% 5. Total Incremental Command (Eq. 26)
+% First Tilt, then Yaw (or the order may change according to frame definition,
+% here we are doing body-intrinsic rotation: q_inc = q_tilt * q_yaw)
+
+q_inc = quat_mul(q_tilt, q_yaw);
+
+% Make the scalar part of q_inc positive (to prevent singularity)
+if q_inc(1) < 0
+    q_inc = -q_inc;
+end
 end
 
 function R = quat_to_R_custom(q)
@@ -626,9 +627,9 @@ function R = quat_to_R_custom(q)
 %   q = [qw; qx; qy; qz] (Scalar first)
 %   R = Body to Inertial rotation matrix
 
-    qw = q(1); qx = q(2); qy = q(3); qz = q(4);
+qw = q(1); qx = q(2); qy = q(3); qz = q(4);
 
-    R = [1 - 2*qy^2 - 2*qz^2,    2*qx*qy - 2*qz*qw,    2*qx*qz + 2*qy*qw;
-         2*qx*qy + 2*qz*qw,    1 - 2*qx^2 - 2*qz^2,    2*qy*qz - 2*qx*qw;
-         2*qx*qz - 2*qy*qw,    2*qy*qz + 2*qx*qw,    1 - 2*qx^2 - 2*qy^2];
+R = [1 - 2*qy^2 - 2*qz^2,    2*qx*qy - 2*qz*qw,    2*qx*qz + 2*qy*qw;
+    2*qx*qy + 2*qz*qw,    1 - 2*qx^2 - 2*qz^2,    2*qy*qz - 2*qx*qw;
+    2*qx*qz - 2*qy*qw,    2*qy*qz + 2*qx*qw,    1 - 2*qx^2 - 2*qy^2];
 end

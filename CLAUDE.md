@@ -9,11 +9,13 @@ MATLAB-based quadrotor simulation implementing differential flatness-based contr
 ```
 test_rig/
 ├── demo_indi_6dof_ned.m      # Main simulation entry point (original trajectory tracking)
-├── demo_mission_1.m          # [NEW] Point-to-point navigation (no obstacles)
-├── demo_mission_2.m          # [NEW] Static obstacle avoidance with RRT
-├── demo_mission_3.m          # [NEW] Pop-up threat avoidance with replanning
+├── demo_mission_1.m          # Point-to-point navigation (no obstacles)
+├── demo_mission_2.m          # Static obstacle avoidance with RRT*
+├── demo_mission_3.m          # Pop-up threat avoidance with replanning
+├── demo_aerobatics.m         # [NEW] Aerobatic maneuvers demonstration
+├── aerobatic_maneuvers.m     # [NEW] Generate waypoints for aerobatic maneuvers
 ├── flat_outputs_demo.m        # Trajectory generation (heart/eight/roulette curves)
-├── yaw_planner.m              # Yaw planning (constant/tangent/coordinated)
+├── yaw_planner.m              # [UPDATED] Yaw planning with multiple modes
 ├── attitude_pd.m              # Quaternion PD attitude controller
 ├── flatness.m                 # Differential flatness feedforward (Eq. 14-15)
 ├── motor_inversion.m          # Motor command mapping with saturation
@@ -22,10 +24,13 @@ test_rig/
 ├── motion_planner/            # Motion planning module
 │   ├── collision_checker.m    # Real-time collision detection
 │   ├── obstacle_manager.m     # Static/dynamic obstacle handling (class)
-│   ├── rrt_planner.m          # RRT-based path planning
-│   ├── trajectory_smoother.m  # Convert waypoints to smooth min-snap trajectories
+│   ├── rrt_planner.m          # [UPDATED] RRT and RRT* path planning
+│   ├── trajectory_smoother.m  # Uses MATLAB minsnappolytraj
 │   └── waypoint_manager.m     # Mission sequencing and replanning (class)
-├── backup_original/           # Backup of original codebase before motion planner
+├── papers/                    # Reference papers
+│   ├── Tal et al. - 2023 - Aerobatic Trajectory Generation...
+│   └── (other Tal & Karaman papers)
+├── backup_original/           # Backup of original codebase
 └── CLAUDE.md                  # This file
 ```
 
@@ -81,8 +86,22 @@ Add autonomous waypoint navigation and obstacle avoidance to the simulation, ena
 | Mission | Description | Planner Mode |
 |---------|-------------|--------------|
 | **Task 1** | Go to target point, no obstacles | Direct waypoint with smooth trajectory |
-| **Task 2** | Navigate around static obstacles | RRT path planning |
-| **Task 3** | Avoid pop-up threats mid-flight | Dynamic replanning with real-time collision check |
+| **Task 2** | Navigate around static obstacles | RRT* path planning (optimal) |
+| **Task 3** | Avoid pop-up threats mid-flight | RRT replanning (fast) |
+
+### RRT vs RRT* Algorithm Selection
+
+The `rrt_planner.m` supports both algorithms via the `algorithm` parameter:
+
+```matlab
+% In waypoint_manager or directly:
+params.algorithm = 'rrt';      % Fast, first valid path
+params.algorithm = 'rrt_star'; % Optimal path with rewiring
+params.rewire_radius = 1.5;    % RRT* neighborhood radius
+```
+
+- **RRT**: Fast planning, suitable for reactive replanning (demo_mission_3)
+- **RRT***: Near-optimal paths, suitable for pre-planned routes (demo_mission_2)
 
 ### Key Components
 
@@ -153,15 +172,68 @@ end
 
 ---
 
+## Aerobatic Maneuvers Module (NEW)
+
+Based on **Tal et al. (2023)**: "Aerobatic Trajectory Generation for a VTOL Fixed-Wing Aircraft Using Differential Flatness".
+
+### Yaw Planner Modes
+
+The `yaw_planner.m` supports multiple yaw reference strategies:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `constant` | Fixed yaw angle | Hovering, simple flight |
+| `constant_rate` | Linear yaw change (ψ = ψ₀ + ω·t) | Barrel rolls, rolling maneuvers |
+| `tangent` | Align with horizontal velocity | 2D coordinated flight |
+| `coordinated` | Full 3D velocity alignment | General aerobatics |
+| `knife_edge` | Body Y vertical (ψ ± 90° from velocity) | Knife-edge flight |
+| `poi` | Track a point of interest | Cinematic/inspection |
+| `velocity_aligned` | Body X along 3D velocity | High-speed flight |
+
+### Aerobatic Maneuvers
+
+The `aerobatic_maneuvers.m` function generates waypoints compatible with `minsnappolytraj`:
+
+| Maneuver | Description | Recommended Yaw Mode |
+|----------|-------------|---------------------|
+| `vertical_loop` | Loop in N-D plane | `coordinated` |
+| `barrel_roll` | Helical roll with yaw rotation | `constant_rate` |
+| `immelmann` | Half loop + half roll | `coordinated` |
+| `split_s` | Half roll + half loop | `coordinated` |
+| `climbing_turn` | 270° banked turn with climb | `coordinated` |
+| `knife_edge` | Transition to knife-edge flight | `knife_edge` |
+| `hover_flip` | Aggressive flip from hover | `constant` |
+| `figure_eight` | Horizontal figure-8 | `tangent` |
+
+### Usage Example
+
+```matlab
+% Generate barrel roll maneuver
+params = struct('center', [0;0;-5], 'radius', 3, 'height_gain', 6, 'V', 8);
+[waypoints, timePoints, velBC, accBC, info] = aerobatic_maneuvers('barrel_roll', params);
+
+% Create smooth trajectory with minsnappolytraj
+numSamples = 500;
+[xref, vref, aref, jref, sref] = minsnappolytraj(waypoints, timePoints, numSamples, ...
+    'VelocityBoundaryCondition', velBC, ...
+    'AccelerationBoundaryCondition', accBC);
+
+% Use recommended yaw mode
+[psi, psi_dot, psi_ddot] = yaw_planner(t, info.yaw_mode, state_ref, info.yaw_params);
+```
+
+---
+
 ## Development Notes
 
 ### Running the Simulation
 ```matlab
 % In MATLAB, from test_rig directory:
 demo_indi_6dof_ned   % Original trajectory tracking demo
-demo_mission_1       % [NEW] Point-to-point mission
-demo_mission_2       % [NEW] Static obstacle avoidance
-demo_mission_3       % [NEW] Pop-up threat avoidance
+demo_mission_1       % Point-to-point mission
+demo_mission_2       % Static obstacle avoidance (RRT*)
+demo_mission_3       % Pop-up threat avoidance (RRT)
+demo_aerobatics      % Aerobatic maneuvers demonstration
 ```
 
 ### Backup & Recovery
@@ -179,7 +251,9 @@ copyfile('backup_original/*.m', '.')
 ### Testing Checklist
 - [ ] Verify original demos still work after changes
 - [ ] Task 1: Drone reaches target within tolerance
-- [ ] Task 2: Path avoids all static obstacles
-- [ ] Task 3: Drone replans and avoids pop-up threat
+- [ ] Task 2: Path avoids all static obstacles (RRT*)
+- [ ] Task 3: Drone replans and avoids pop-up threat (RRT)
 - [ ] Trajectory smoothness maintained (no discontinuities)
 - [ ] Control effort within motor limits
+- [ ] Aerobatic maneuvers track correctly
+- [ ] Yaw modes produce expected behavior
