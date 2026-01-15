@@ -135,17 +135,36 @@ switch lower(mode)
             end
 
             % TÜREVLER (Feedforward)
-            % Coordinated turn için tam analitik türev çok karmaşıktır.
-            % Ancak "tangent" türev yaklaşımı (yatay düzlem) burada da %95 oranında iş görür.
-            % Çünkü Yaw, yerel Z ekseni etrafındaki dönüştür.
-
             v_hor_sq = vx^2 + vy^2;
             if v_hor_sq > 0.1
                 psi_dot = (vx*ay - vy*ax) / v_hor_sq;
+
+                % Analytical psi_ddot if Jerk is available
+                if isfield(state_ref, 'j')
+                    jx = state_ref.j(1);
+                    jy = state_ref.j(2);
+
+                    % N = vx*ay - vy*ax
+                    % D = vx^2 + vy^2
+                    % psi_ddot = (N_dot*D - N*D_dot) / D^2
+
+                    N = vx*ay - vy*ax;
+                    D = v_hor_sq;
+
+                    % N_dot = vx*jy - vy*jx
+                    N_dot = vx*jy - vy*jx;
+
+                    % D_dot = 2*vx*ax + 2*vy*ay
+                    D_dot = 2*vx*ax + 2*vy*ay;
+
+                    psi_ddot = (N_dot*D - N*D_dot) / (D^2);
+                else
+                    psi_ddot = 0;
+                end
             else
                 psi_dot = 0;
+                psi_ddot = 0;
             end
-            psi_ddot = 0;
         end
 
     case "knife_edge"

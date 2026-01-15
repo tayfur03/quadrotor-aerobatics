@@ -28,23 +28,23 @@ fprintf('  4. Immelmann Turn\n');
 fprintf('  5. Split-S\n');
 fprintf('  6. Climbing Turn (270 deg)\n');
 fprintf('  7. Figure Eight\n');
-fprintf('  8. Hippodrome Circuit\n');
+fprintf('  8. Racetrack Circuit\n');
 fprintf('  9. Run All (Sequential)\n\n');
 
 % Default selection (can be changed)
 % selection = 2;  % Run All
-% selection = input('Select maneuver (1-9): ');
+selection = input('Select maneuver (1-9): ');
 
 % Default maneuver
-% maneuver_type_str = 'split_s';
-maneuver_type_str = 'hippodrome';
-% maneuver_type_str = 'immelmann';
+%maneuver_type_str = 'split_s';
+%maneuver_type_str = 'racetrack';
+%maneuver_type_str = 'immelmann';
 
 maneuver_names = {'straight_line', 'vertical_loop', 'barrel_roll', 'immelmann', ...
-    'split_s', 'climbing_turn', 'figure_eight', 'hippodrome'};
+    'split_s', 'climbing_turn', 'figure_eight', 'racetrack'};
 
 % Determine selection based on maneuver_type_str
-selection = find(strcmpi(maneuver_names, maneuver_type_str), 1);
+% selection = find(strcmpi(maneuver_names, maneuver_type_str), 1);
 if isempty(selection)
     warning('Specified maneuver_type_str "%s" not found. Defaulting to Vertical Loop.', maneuver_type_str);
     selection = 2; % Default to Vertical Loop if not found
@@ -73,7 +73,7 @@ maneuver_params = struct();
 
 % Default parameters (matching paper Fig. 3 for vertical loop)
 maneuver_params.radius = 1.0;         % 1m radius as in paper
-maneuver_params.V = 5;              % ~3.5 m/s nominal speed
+maneuver_params.V = 3.5;              % ~3.5 m/s nominal speed
 maneuver_params.start_pos = [0; 0; -3.5];  % Start at 2.5m altitude
 maneuver_params.num_rolls = 1;
 maneuver_params.climb_height = 1.0;

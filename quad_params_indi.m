@@ -24,7 +24,7 @@ ly = params.ly;
 params.G1 = [ ...
      ly*kT   -ly*kT   -ly*kT    ly*kT ;   % mu_x
      lx*kT    lx*kT   -lx*kT   -lx*kT ;   % mu_y
-    -kMz      kMz     -kMz      kMz  ;    % mu_z
+     -kMz      kMz     -kMz      kMz  ;    % mu_z
      kT       kT       kT       kT   ];   % T  (thrust magnitude)
 
 % Hover rotor speed (approx)
@@ -40,12 +40,12 @@ params.yaw = "constant";
 % params.Kx = diag([4.0, 4.0, 6.0]);
 % params.Kv = diag([4.0, 4.0, 4.5]);
 % params.Ka = diag([0.8, 0.8, 0.8]);
-% 
+%
 % % Attitude gains
 % params.Kxi    = diag([10.0, 10.0, 6.0]);    % angle error gains
 % params.Komega = 0.8 * diag([4.0, 4.0, 3.0]);    % rate damping
 
-% Outer-loop gains (Eq. 17) 
+% Outer-loop gains (Eq. 17)
 % Gains are from Table-II
 % [x,y,z]
 params.Kx = diag([18.0, 18.0, 13.5]);

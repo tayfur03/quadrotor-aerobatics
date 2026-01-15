@@ -70,7 +70,7 @@ sol_14 = (M_sq + lambda_dls * I_dls) \ (M' * rhs_14);
 Omega_ref   = sol_14(1:3);
 
 % Safety saturation for Omega_ref
-max_omega = 40.0; % rad/s (approx 2300 deg/s) - increased limit
+max_omega = 15.0; % rad/s (approx 860 deg/s) - realistic limit
 if norm(Omega_ref) > max_omega
     Omega_ref = (Omega_ref / norm(Omega_ref)) * max_omega;
 end

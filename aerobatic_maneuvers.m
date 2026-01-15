@@ -14,7 +14,7 @@ function [waypoints, timePoints, velBC, accBC, maneuver_info] = aerobatic_maneuv
 %                   'split_s'         - Half roll + half loop (opposite of Immelmann)
 %                   'climbing_turn'   - Banked turn with altitude change
 %                   'figure_eight'    - Horizontal figure-8 pattern
-%                   'hippodrome'      - Hippodrome (Stadium) shaped circuit
+%                   'racetrack'      - Racetrack shaped circuit
 %
 %   params - Struct with maneuver parameters:
 %            .radius       - Loop/turn radius [m] (default: 3)
@@ -93,11 +93,11 @@ switch lower(maneuver_type)
         [waypoints, timePoints, velBC, accBC, maneuver_info] = ...
             generate_figure_eight(start_pos, radius, V);
 
-    case 'hippodrome'
+    case 'racetrack'
         length_N = get_param(params, 'length', 12.0);
         width_E  = get_param(params, 'width', 6.0);
         [waypoints, timePoints, velBC, accBC, maneuver_info] = ...
-            generate_hippodrome(start_pos, length_N, width_E, V);
+            generate_racetrack(start_pos, length_N, width_E, V);
 
     otherwise
         error('Unknown maneuver type: %s', maneuver_type);
@@ -751,8 +751,8 @@ end
 
 %% ============== RECTANGULAR CIRCUIT ==============
 
-function [wp, tp, velBC, accBC, info] = generate_hippodrome(start, L, W, V)
-%GENERATE_HIPPODROME Hippodrome (Stadium) shaped circuit
+function [wp, tp, velBC, accBC, info] = generate_racetrack(start, L, W, V)
+%GENERATE_RACETRACK Racetrack shaped circuit
 %
 % Shape: Two parallel straights connected by two 180-degree turns (semicircles).
 % Orientation: Long axis aligned with North-South.
@@ -769,7 +769,7 @@ R = W / 2;          % Turn radius
 L_straight = L - W; % Length of the straight component
 
 if L_straight < 0
-    warning('Length must be greater than Width for a hippodrome. Clamping to Circle.');
+    warning('Length must be greater than Width for a racetrack. Clamping to Circle.');
     L_straight = 0;
     R = L / 2;
     W = L;
@@ -854,11 +854,11 @@ seg_lens = [
 path_len = [0; cumsum(seg_lens)];
 tp = path_len' / V;
 
-info.name = 'Hippodrome Circuit';
+info.name = 'Racetrack Circuit';
 info.total_time = tp(end);
 info.yaw_mode = 'tangent';
 info.yaw_params = struct();
-info.description = sprintf('Hippodrome %gx%gm, V=%.1fm/s', L, W, V);
+info.description = sprintf('Racetrack %gx%gm, V=%.1fm/s', L, W, V);
 end
 
 %% ============== HELPER FUNCTION ==============
