@@ -269,5 +269,128 @@ classdef los_checker < handle
                 angles(i) = obj.get_masking_angle(pos, direction, max_range);
             end
         end
+
+        function [intersects, intersection_pt, distance] = cast_radar_ray(obj, origin, direction, max_range)
+            %CAST_RADAR_RAY Cast a radar beam ray and find terrain intersection
+            %   [intersects, point, dist] = cast_radar_ray(origin, direction, max_range)
+            %
+            %   Casts a ray from origin in the given direction and finds where
+            %   it intersects the terrain. Uses stepping with binary search
+            %   refinement for precise intersection detection.
+            %
+            %   Inputs:
+            %       origin    - [3x1] ray origin [N; E; altitude] (altitude positive up)
+            %       direction - [3x1] ray direction vector (will be normalized)
+            %       max_range - Maximum range to check [m]
+            %
+            %   Outputs:
+            %       intersects      - true if ray intersects terrain
+            %       intersection_pt - [3x1] intersection point (or endpoint if no hit)
+            %       distance        - Distance from origin to intersection
+            %
+            %   Example:
+            %       radar_pos = [0; 0; 200];
+            %       direction = [1; 0; -0.1];  % Slightly downward beam
+            %       [hit, pt, d] = los.cast_radar_ray(radar_pos, direction, 5000);
+
+            origin = origin(:);
+            direction = direction(:);
+
+            % Normalize direction
+            dir_norm = norm(direction);
+            if dir_norm < 1e-10
+                intersects = false;
+                intersection_pt = origin;
+                distance = 0;
+                return;
+            end
+            direction = direction / dir_norm;
+
+            % Use half the terrain resolution for stepping
+            step = obj.sample_spacing / 2;
+            n_steps = ceil(max_range / step);
+
+            prev_above = true;
+            precision = 0.5;  % Binary search precision [m]
+
+            for i = 1:n_steps
+                t = i * step;
+                point = origin + direction * t;
+
+                terrain_h = obj.terrain.get_height(point(1), point(2));
+
+                if isnan(terrain_h)
+                    continue;
+                end
+
+                current_above = point(3) >= terrain_h;
+
+                if ~current_above && prev_above
+                    % Ray crossed terrain - refine with binary search
+                    t_low = (i - 1) * step;
+                    t_high = t;
+
+                    while (t_high - t_low) > precision
+                        t_mid = (t_low + t_high) / 2;
+                        p_mid = origin + direction * t_mid;
+                        h_mid = obj.terrain.get_height(p_mid(1), p_mid(2));
+
+                        if isnan(h_mid) || p_mid(3) >= h_mid
+                            t_low = t_mid;
+                        else
+                            t_high = t_mid;
+                        end
+                    end
+
+                    distance = (t_low + t_high) / 2;
+                    intersection_pt = origin + direction * distance;
+                    intersects = true;
+                    return;
+                end
+
+                prev_above = current_above;
+            end
+
+            % No intersection
+            intersects = false;
+            intersection_pt = origin + direction * max_range;
+            distance = max_range;
+        end
+
+        function [visible_from_radar, shadow_map] = compute_radar_shadow(obj, radar_pos, grid_alt, bounds)
+            %COMPUTE_RADAR_SHADOW Compute radar shadow zones at flight altitude
+            %   [visible, shadow] = compute_radar_shadow(radar_pos, alt, bounds)
+            %
+            %   Computes which areas at the specified flight altitude are
+            %   visible to the radar and which are in terrain shadow.
+            %
+            %   Inputs:
+            %       radar_pos - [3x1] radar position [N; E; altitude]
+            %       grid_alt  - Flight altitude to check visibility [m]
+            %       bounds    - [N_min, N_max, E_min, E_max] (default: terrain bounds)
+            %
+            %   Outputs:
+            %       visible_from_radar - Logical grid (true = visible)
+            %       shadow_map         - Logical grid (true = in shadow)
+
+            if nargin < 4
+                bounds = obj.terrain.bounds;
+            end
+
+            radar_pos = radar_pos(:);
+
+            N_vec = bounds(1):obj.terrain.resolution:bounds(2);
+            E_vec = bounds(3):obj.terrain.resolution:bounds(4);
+            [N_grid, E_grid] = meshgrid(N_vec, E_vec);
+
+            visible_from_radar = false(size(N_grid));
+
+            for i = 1:numel(N_grid)
+                target_pos = [N_grid(i); E_grid(i); grid_alt];
+                visible_from_radar(i) = obj.has_los(radar_pos, target_pos);
+            end
+
+            shadow_map = ~visible_from_radar;
+        end
     end
 end

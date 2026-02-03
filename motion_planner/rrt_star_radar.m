@@ -32,6 +32,7 @@ rewire_radius = get_param(params, 'rewire_radius', 100);
 alpha = get_param(params, 'alpha', 1.2);        % Distance weight
 beta = get_param(params, 'beta', 100);         % Radar cost weight
 gamma = get_param(params, 'gamma', 0.1);        % Altitude cost weight
+%lambda = get_param(params,'lambda', 100);       % Rate of Altitude Change weight
 min_clearance = get_param(params, 'min_clearance', 20);
 preferred_alt = get_param(params, 'preferred_alt', 50);
 max_climb = get_param(params, 'max_climb', 30);
