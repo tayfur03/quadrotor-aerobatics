@@ -25,19 +25,28 @@ classdef radar_ray_caster < handle
 %   plot_shadow_map(radar_pos, bounds)     - Visualize shadow zones
 %
 % Example:
-%   terrain_data = terrain_generator('ridge');
+%   terrain_data = terrain_generator(struct('type','hills'));
 %   tm = terrain_map(terrain_data);
 %   rc = radar_ray_caster(tm);  % Auto-creates mesh for fast intersection
 %
 %   radar_pos = [0; 0; 200];  % Radar position [N; E; altitude]
+%   bounds = [-1000 1000 -1000 1000];
 %   [hit, point, dist] = rc.cast_ray(radar_pos, [1; 0; -0.1], 5000);
 %   if hit
 %       fprintf('Beam hits terrain at [%.1f, %.1f, %.1f]\n', point);
 %   end
 %
 %   % Compute shadow map
-%   shadow = rc.compute_shadow_map(radar_pos, [-1000 1000 -1000 1000]);
-%   rc.plot_shadow_map(radar_pos, [-1000 1000 -1000 1000]);
+%   shadow = rc.compute_shadow_map(radar_pos, bounds);
+%   rc.plot_shadow_map(radar_pos, bounds);
+%   
+%   % Compute visibility slice
+%   alt = 200; % [m] 
+%   azimuth = 90; %[deg]
+%   max_range = 1000; %[m]
+%   resolution = 30; %[m]
+%   coverage = rc.compute_coverage_map(radar_pos,bounds,alt);
+%   rc.plot_coverage_slice(radar_pos,azimuth,max_range,resolution);
 %
 % Author: Quadrotor Terrain Following Project
 % See also: terrain_map, terrain_mesh, moller_trumbore, los_checker
@@ -289,9 +298,6 @@ classdef radar_ray_caster < handle
 
             for i = 1:numel(N_grid)
                 % Target point on terrain surface
-                if mod(i,200) == 0
-                    fprintf("you are at %d\n",i)
-                end
                 N = N_grid(i);
                 E = E_grid(i);
                 terrain_h = obj.terrain.get_height(N, E);

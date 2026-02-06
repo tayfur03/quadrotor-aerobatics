@@ -32,6 +32,10 @@ terrain_params.type = 'mountain';
 
 terrain_data = terrain_generator(terrain_params);
 tm = terrain_map(terrain_data);
+
+% terrain_data = dem_loader('DEM/artvin.tif');
+% tm = terrain_map(terrain_data);
+% Bunun yerine radar_ray_caster gelecek. meshli falan
 los = los_checker(tm);
 
 % 2. Setup Hostile Radar
@@ -84,7 +88,7 @@ xlabel('North'); ylabel('East');
 % RRT Parameters
 planner_params.max_iter = 2500; % Need enough iterations to find the long way around
 planner_params.step_size = 40;
-planner_params.goal_bias = 0.1;
+planner_params.goal_bias = 0.2;
 planner_params.alpha = 2.0;
 planner_params.beta = 50;
 planner_params.gamma = 0.1;         % Altitude cost
@@ -170,11 +174,11 @@ title('Terrain Following Performance');
 grid on;
 
 %% ==================== VIDEO SETUP ====================
-video_filename = 'terrain_masking_demo';
-v = VideoWriter(video_filename, 'MPEG-4');
-v.FrameRate = 30;
-open(v);
-fprintf('\nRecording video to %s.mp4...\n', video_filename);
+% video_filename = 'terrain_masking_demo';
+% v = VideoWriter(video_filename, 'MPEG-4');
+% v.FrameRate = 30;
+% open(v);
+% fprintf('\nRecording video to %s.mp4...\n', video_filename);
 
 %% ==================== ANIMATION 2: FLIGHT VISUALIZATION ====================
 fprintf('\nStep 3: 3D Flight Animation...\n');
@@ -252,7 +256,7 @@ for k = 1:length(t_sim)
 
     % Record Frame
     frame = getframe(gcf);
-    writeVideo(v, frame);
+    %writeVideo(v, frame);
 end
 
 close(v);
@@ -324,7 +328,7 @@ p_line = patch([x_path nan], [y_path nan], [z_offset_vis nan], [risks nan], ...
 c_risk = [0 1 0; 1 1 0; 1 0 0];
 cmap_risk = interp1([0 0.5 1], c_risk, linspace(0,1,256));
 colormap(fig_report, cmap_risk);
-caxis([0 1]);
+clim([0 1]);
 cbar = colorbar;
 cbar.Label.String = 'Detection Probability (P_{det})';
 

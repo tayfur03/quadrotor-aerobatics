@@ -134,13 +134,22 @@ threat.compute_map();
 fprintf('\n--- module: PATH PLANNING (RRT*) ---\n');
 
 % Define Start and Goal relative to terrain bounds
-margin = 0.1;  % 10% margin from edges
-start_N = tm.bounds(1) + (tm.bounds(2) - tm.bounds(1)) * margin;
-start_E = tm.bounds(3) + (tm.bounds(4) - tm.bounds(3)) * margin;
+margin = 0.3;  % 10% margin from edges
+% Switch the start/goal coordinates (swap North/East)
+% Original positions (corner margins)
+sN = tm.bounds(1) + (tm.bounds(2) - tm.bounds(1)) * margin;
+sE = tm.bounds(3) + (tm.bounds(4) - tm.bounds(3)) * margin;
+
+gN = tm.bounds(2) - (tm.bounds(2) - tm.bounds(1)) * margin;
+gE = tm.bounds(4) - (tm.bounds(4) - tm.bounds(3)) * margin;
+
+% Swap start and goal as requested
+start_N = gN;
+start_E = gE;
 start_h = tm.get_height(start_N, start_E);
 
-goal_N = tm.bounds(2) - (tm.bounds(2) - tm.bounds(1)) * margin;
-goal_E = tm.bounds(4) - (tm.bounds(4) - tm.bounds(3)) * margin;
+goal_N = sN;
+goal_E = sE;
 goal_h = tm.get_height(goal_N, goal_E);
 
 % Validate terrain heights
@@ -166,14 +175,14 @@ terrain_diagonal = sqrt((tm.bounds(2)-tm.bounds(1))^2 + (tm.bounds(4)-tm.bounds(
 rrt_params = struct();
 rrt_params.max_iter = 6000;        % More iterations for larger terrain
 rrt_params.step_size = min(demo_params.max_step_size, ...
-                           max(demo_params.min_step_size, terrain_diagonal/30));
+                           max(demo_params.min_step_size, terrain_diagonal/15));
 rrt_params.min_clearance = demo_params.min_clearance;  % AGL minimum (increased for mountain terrain)
-rrt_params.goal_bias = 0.15;       % Slightly higher goal bias for faster convergence
+rrt_params.goal_bias = 0.2;       % Slightly higher goal bias for faster convergence
 rrt_params.beta = 30;              % Use fixed radar cost weight (from RRT* fixes)
 rrt_params.shadow_bias = 0.4;      % Moderate shadow sampling bias
 rrt_params.max_flight_alt = demo_params.max_flight_alt;   % Higher for mountain terrain
 rrt_params.plot_interval = 500;    % Less frequent updates
-rrt_params.animate = false;        % Disable animation for speed
+rrt_params.animate = true;        % Disable animation for speed
 
 % CRITICAL: Reduce altitude cost to prevent terrain-following oscillations
 % High gamma causes RRT* to create many waypoints following terrain contours
@@ -232,7 +241,7 @@ path_len = 0;
 for i = 2:size(path_simplified, 2)
     path_len = path_len + norm(path_simplified(:,i) - path_simplified(:,i-1));
 end
-avg_speed = 15;  % Back to reasonable speed
+avg_speed = 5;  % Back to reasonable speed
 total_time = path_len / avg_speed;
 fprintf('Estimated flight time: %.1f s (Avg Speed: %.1f m/s)\n', total_time, avg_speed);
 

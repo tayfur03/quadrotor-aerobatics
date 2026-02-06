@@ -25,7 +25,7 @@ function terrain = terrain_generator(params)
 %             .type       - Terrain type string
 %
 % Example:
-%   terrain = terrain_generator('hills', struct('amplitude', 50));
+%   terrain = terrain_generator(struct('type','hills', 'amplitude', 50));
 %   surf(terrain.N_grid, terrain.E_grid, terrain.Z);
 %
 % Author: Quadrotor Terrain Following Project

@@ -174,10 +174,12 @@ for iter = 1:max_iter
             nodes(:, goal_idx_in_tree) = goal;
             parents(goal_idx_in_tree) = new_idx;
             costs(goal_idx_in_tree) = total_goal_cost;
+            disp(total_goal_cost)
 
             if ~goal_reached || total_goal_cost < costs(goal_node_idx)
                 goal_reached = true;
                 goal_node_idx = goal_idx_in_tree;
+                
                 fprintf('Goal reached at iter %d! Cost: %.2f\n', iter, total_goal_cost);
             end
         end
@@ -192,7 +194,7 @@ end
 if goal_reached
     path = extract_path(nodes, parents, goal_node_idx);
 else
-    [~, closest_idx] = find_nearest(nodes, goal);
+    [closest_idx, ~] = find_nearest(nodes, goal);
     path = extract_path(nodes, parents, closest_idx);
     warning('Goal not reached.');
 end
@@ -206,6 +208,7 @@ path_risk = compute_path_risk(path, threat);
 info.success = goal_reached;
 info.iterations = iter;
 info.tree_size = size(nodes, 2);
+disp(goal_node_idx)
 info.path_cost = ternary(goal_reached, costs(goal_node_idx), costs(end));
 info.path_length = path_length;
 info.path_risk = path_risk;
