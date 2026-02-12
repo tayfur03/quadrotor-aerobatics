@@ -39,6 +39,12 @@ function traj = trajectory_smoother(waypoints, total_time, params)
 
     dt = get_param(params, 'dt', 0.002);
     v_max = get_param(params, 'v_max', 5.0);
+    a_max = get_param(params, 'a_max', 5.0);  % Max acceleration [m/s^2]
+
+    max_waypoints = get_param(params, 'max_waypoints', 60);  % Increased: ok with short segments
+    cruise_speed = get_param(params, 'cruise_speed', v_max * 0.7); % Reverted to original default
+    vel_bc_mode = get_param(params, 'vel_bc_mode', 'free');
+    max_seg_length = get_param(params, 'max_seg_length', 150);  % Max meters per segment
 
     % Boundary conditions for smooth replanning
     init_vel = get_param(params, 'init_vel', [0;0;0]);
@@ -46,19 +52,12 @@ function traj = trajectory_smoother(waypoints, total_time, params)
     final_vel = get_param(params, 'final_vel', [0;0;0]);
     final_acc = get_param(params, 'final_acc', [0;0;0]);
 
-    % Velocity BC mode: 'free' (NaN) or 'bisector' (direction-based)
-    vel_bc_mode = get_param(params, 'vel_bc_mode', 'free');
-    cruise_speed = get_param(params, 'cruise_speed', v_max * 0.7);
-
-    % Maximum waypoints before minsnappolytraj becomes poorly conditioned
-    max_waypoints = get_param(params, 'max_waypoints', 25);
-
     waypoints = waypoints(:, :);  % Ensure 2D
     original_count = size(waypoints, 2);
 
     % --- STEP 1: FILTER DUPLICATE WAYPOINTS ---
     % Remove consecutive points that are too close (causes non-increasing time)
-    min_dist = 10;  % Minimum distance between waypoints (meters)
+    min_dist = 0.1;  % Minimum distance between waypoints (meters)
     keep_mask = true(1, size(waypoints, 2));
     for i = 2:size(waypoints, 2)
         if norm(waypoints(:, i) - waypoints(:, i-1)) < min_dist
@@ -111,21 +110,18 @@ function traj = trajectory_smoother(waypoints, total_time, params)
     end
 
     % Warn if still potentially problematic
-    if n_waypoints > 20
+    if n_waypoints > 60
         warning('Trajectory smoother: %d waypoints may cause numerical issues', n_waypoints);
     end
 
-    % Allocate time per segment based on distance
-    segment_times = allocate_segment_times(waypoints, total_time, v_max);
+    % --- STEP 2.5: SUBDIVIDE LONG SEGMENTS ---
+    % Prevents ill-conditioned polynomial matrices (T^7 blows up for large T)
+    waypoints = subdivide_long_segments(waypoints, max_seg_length);
+    n_waypoints = size(waypoints, 2);
+    fprintf('After subdivision (max %.0fm/seg): %d waypoints\n', max_seg_length, n_waypoints);
 
-    % Create time points for each waypoint
-    timePoints = [0, cumsum(segment_times)];
-
-    % Number of samples
-    numSamples = round(total_time / dt) + 1;
-
-    % Setup velocity boundary conditions
-    % NaN means "free" - let optimizer choose optimal value
+    % --- STEP 3: COMPUTE VELOCITY BOUNDARY CONDITIONS ---
+    % Must be done before time allocation so the optimizer uses them
     velBC = nan(3, n_waypoints);
     velBC(:, 1) = init_vel;          % Initial velocity: specified
     velBC(:, end) = final_vel;       % Final velocity: specified
@@ -171,13 +167,34 @@ function traj = trajectory_smoother(waypoints, total_time, params)
         fprintf('Velocity BC mode: FREE (optimizer chooses interior velocities)\n');
     end
 
+    % --- STEP 4: 3-STAGE HYBRID TIME ALLOCATION ---
+    % Stage 1: A priori feasibility bounds (turn angle + kinematic limits)
+    % Stage 2: Mellinger closed-form snap-optimal times with k_T
+    % Stage 3: Single-pass polynomial post-check & refinement
+    aggressiveness = get_param(params, 'aggressiveness', 2.0);
+    fprintf('Running 3-stage time allocation (v=%.1f, a=%.1f, k_T=%.1f)...\n', v_max, a_max, aggressiveness);
+
+    opt_params = struct('aggressiveness', aggressiveness, 'samples_per_seg', 50);
+    try
+        [segment_times, time_info] = optimize_time_allocation(waypoints, v_max, a_max, velBC, opt_params);
+        total_time = time_info.total_time;
+    catch ME
+        warning('optimize_time_allocation failed: %s. Falling back to proportional allocation.', ME.message);
+        segment_times = allocate_segment_times(waypoints, total_time, v_max);
+    end
+
     % Setup acceleration boundary conditions
     accBC = nan(3, n_waypoints);
     accBC(:, 1) = init_acc;          % Initial acceleration: specified
     accBC(:, end) = final_acc;       % Final acceleration: specified
     % Interior waypoints: NaN (free)
 
-    % Call MATLAB's minsnappolytraj
+    % Create time points and samples from optimized segment times
+    timePoints = [0, cumsum(segment_times)];
+    total_time = timePoints(end);
+    numSamples = min(round(total_time / dt) + 1, 20000);  % Cap to prevent OOM
+
+    % Call MATLAB's minsnappolytraj with optimized times
     [pos, vel, acc, jerk, snap, ~, ~, tSamples] = minsnappolytraj(...
         waypoints, ...
         timePoints, ...
@@ -220,17 +237,45 @@ function segment_times = allocate_segment_times(waypoints, total_time, v_max)
 
     if total_distance < 1e-6
         segment_times = ones(1, n_segments) * total_time / n_segments;
-    else
-        % Proportional to distance
-        segment_times = (distances / total_distance) * total_time;
-
-        % Ensure minimum time based on velocity constraint
-        min_times = distances / v_max;
-        segment_times = max(segment_times, min_times);
-
-        % Renormalize to match total_time
-        segment_times = segment_times * (total_time / sum(segment_times));
+        return;
     end
+    
+    % Calculate minimum times required based on v_max
+    min_times = distances / v_max;
+    min_total_time = sum(min_times);
+    
+    % If requested total_time is less than minimum required, adjust it
+    if total_time < min_total_time
+        warning('trajectory_smoother:TimeAdjusted', ...
+            'Requested time %.1fs < minimum %.1fs for v_max=%.1fm/s. Extending to minimum.', ...
+            total_time, min_total_time, v_max);
+        total_time = min_total_time * 1.1;  % 10% margin
+    end
+    
+    % Proportional allocation based on distance
+    segment_times = (distances / total_distance) * total_time;
+    
+    % Enforce minimum times (this may increase total time)
+    segment_times = max(segment_times, min_times);
+    
+    % Check if we exceeded total_time after enforcing minimums
+    actual_total = sum(segment_times);
+    if actual_total > total_time * 1.01  % More than 1% over
+        % Scale down non-minimum segments to fit
+        excess = actual_total - total_time;
+        slack = segment_times - min_times;  % Available slack per segment
+        total_slack = sum(slack);
+        
+        if total_slack > excess
+            % Distribute reduction proportionally to slack
+            reduction_ratio = excess / total_slack;
+            segment_times = segment_times - slack * reduction_ratio;
+        end
+        % If not enough slack, we'll exceed total_time (can't go below v_max)
+    end
+    
+    % Ensure strictly positive times (avoid numerical issues)
+    segment_times = max(segment_times, 0.1);
 end
 
 function simplified = simplify_path_internal(path, tolerance)
@@ -278,5 +323,30 @@ function simplified = simplify_path_internal(path, tolerance)
         simplified = [left, right(:, 2:end)];
     else
         simplified = path(:, [1, end]);
+    end
+end
+
+function wp_out = subdivide_long_segments(waypoints, max_seg_length)
+% SUBDIVIDE_LONG_SEGMENTS Split segments that exceed max_seg_length
+% Inserts equidistant intermediate waypoints along segments that are too long.
+% This keeps polynomial segment times short for good numerical conditioning.
+
+    n = size(waypoints, 2);
+    wp_out = waypoints(:, 1);
+
+    for i = 1:n-1
+        p1 = waypoints(:, i);
+        p2 = waypoints(:, i+1);
+        seg_len = norm(p2 - p1);
+
+        if seg_len > max_seg_length
+            n_sub = ceil(seg_len / max_seg_length);
+            for j = 1:n_sub-1
+                t = j / n_sub;
+                wp_out(:, end+1) = p1 + t * (p2 - p1);
+            end
+        end
+
+        wp_out(:, end+1) = p2;
     end
 end

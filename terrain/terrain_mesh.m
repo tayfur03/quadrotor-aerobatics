@@ -74,8 +74,23 @@ classdef terrain_mesh < handle
             obj.n_rows = length(obj.E_vec);
             obj.n_cols = length(obj.N_vec);
 
+            % Get Z matrix and check orientation
+            Z = terrain_data.Z;
+            expected_size = [obj.n_rows, obj.n_cols];  % [length(E_vec), length(N_vec)]
+            actual_size = size(Z);
+            
+            % Check if Z needs to be transposed (same logic as terrain_map)
+            if isequal(actual_size, flip(expected_size))
+                Z = Z';
+                fprintf('terrain_mesh: Z matrix transposed to [%d, %d]\n', size(Z, 1), size(Z, 2));
+            elseif ~isequal(actual_size, expected_size)
+                warning('terrain_mesh:SizeMismatch', ...
+                    'Z matrix size [%d, %d] does not match grid vectors [%d, %d]. Attempting to continue...', ...
+                    actual_size(1), actual_size(2), expected_size(1), expected_size(2));
+            end
+
             % Create triangle mesh from grid
-            obj.triangulate_grid(terrain_data.Z);
+            obj.triangulate_grid(Z);
 
             % Build spatial acceleration index
             obj.build_spatial_index(index_cell_size);
@@ -296,7 +311,7 @@ classdef terrain_mesh < handle
             idx = 1;
             for i = 1:n_E
                 for j = 1:n_N
-                    obj.vertices(idx, :) = [obj.N_vec(j), obj.E_vec(i), Z(j, i)];
+                    obj.vertices(idx, :) = [obj.N_vec(j), obj.E_vec(i), Z(i, j)];
                     idx = idx + 1;
                 end
             end

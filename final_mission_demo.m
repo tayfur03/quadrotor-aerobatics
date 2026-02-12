@@ -23,20 +23,20 @@ addpath('motion_planner');
 
 % Demo Parameters
 demo_params = struct();
-demo_params.dem_file = 'DEM/agri.tif';  % Ignored when use_synthetic=true
-demo_params.use_synthetic = false;           % Use real DEM
+demo_params.dem_file = 'DEM/artvin.tif';  % Ignored when use_synthetic=true
+demo_params.use_synthetic = true;           % Use synthetic terrain
 demo_params.adaptive_res_target = 150;       % Max grid dimension for viz
 demo_params.animate = true;
 
-% Scale-adaptive parameters for large terrain
-demo_params.max_threat_cells = 25000;        % Max cells for threat map (~25k)
-demo_params.max_radar_range = 10000;          % Max realistic radar range [m]
-demo_params.min_step_size = 50;              % Min RRT* step size [m]
-demo_params.max_step_size = 400;             % Max RRT* step size [m]
-demo_params.min_clearance = 50;             % Minimum AGL clearance [m]
-demo_params.max_flight_alt = 600;           % Maximum AGL altitude for planning [m]
-demo_params.start_agl = 100;                 % Start altitude AGL [m]
-demo_params.goal_agl = 120;                  % Goal altitude AGL [m]
+% Scale-adaptive parameters
+demo_params.max_threat_cells = 25000;
+demo_params.max_radar_range = 10000;
+demo_params.min_step_size = 30;              % Smaller steps for detailed ridge terrain
+demo_params.max_step_size = 250;             % Reasonable max
+demo_params.min_clearance = 30;              % 30m AGL minimum — closer to terrain = dramatic
+demo_params.max_flight_alt = 400;            % Room above the ridge
+demo_params.start_agl = 60;                  % Low start — close to terrain
+demo_params.goal_agl = 60;                   % Low goal — close to terrain
 
 %% 2. Environment Loading
 fprintf('--- module: ENVIRONMENT ---\n');
@@ -48,14 +48,15 @@ if ~demo_params.use_synthetic && isfile(demo_params.dem_file)
     dem_params.fill_nodata = 'nearest';
     terrain_data = dem_loader(demo_params.dem_file, dem_params);
 else
-    fprintf('Using SYNTHETIC terrain: ridge\n');
+    fprintf('Using SYNTHETIC terrain: mountain\n');
     t_params = struct();
-    t_params.bounds = [-1500, 1500, -1500, 1500];  % 3km x 3km area
-    t_params.resolution = 15;
-    t_params.type = 'mountain';       % North-South ridge in the middle
-    t_params.amplitude = 150;      % Max height ~150m
-    t_params.wavelength = 400;     % Ridge width
-    t_params.base_height = 20;     % Valley floor height
+    t_params.bounds = [0, 3000, -1500, 1500];       % 3km x 3km — like demo_terrain_masking scaled up
+    t_params.resolution = 12;                        % Fine mesh for smooth rendering
+    t_params.type = 'mountain';                      % Central peak — same as demo_terrain_masking
+    t_params.amplitude = 300;                        % Tall prominent peak (scaled from 250m)
+    t_params.wavelength = 800;                       % Broad base (scaled from 300m)
+    t_params.base_height = 5;                        % Low base for contrast
+    t_params.seed = 42;
     terrain_data = terrain_generator(t_params);
 end
 
@@ -104,27 +105,22 @@ threat = threat_map(tm, los, 0.1, struct('resolution', map_res, 'alt_range', [al
 % --- Auto-calculate positions based on terrain bounds ---
 terrain_width = tm.bounds(2) - tm.bounds(1);
 
-% Radar 1: High point near center (DISABLED for now - uncomment to add)
-radar1_N = mean(tm.bounds(1:2));
-radar1_E = mean(tm.bounds(3:4));
+% Radar on the mountain slope — same concept as demo_terrain_masking
+% Mountain peak is at center of map: (1500, 0)
+% Radar on the west slope, offset south — forces drone to flank around east side
+peak_N = mean(tm.bounds(1:2));   % 1500
+peak_E = mean(tm.bounds(3:4));   % 0
+
+radar1_N = peak_N;               % Same N as peak
+radar1_E = peak_E - 400;         % West slope (south of center in E)
 radar1_h = tm.get_height(radar1_N, radar1_E);
-radar1_pos = [radar1_N; radar1_E; radar1_h + 20];
-radar1 = radar_site(radar1_pos, 'Central_Radar', 'tracking');
-%radar1.R_max = min(demo_params.max_radar_range, terrain_width * 0.15);  % Capped range
-radar1.R_max = 10000;
-%threat.add_radar(radar1);  % DISABLED
+radar1_pos = [radar1_N; radar1_E; radar1_h + 15];
+radar1 = radar_site(radar1_pos, 'Slope_Radar', 'tracking');
+radar1.R_max = min(2000, terrain_width * 0.3);  % Covers west approach + direct path
+radar1.P_t = 250e3;  % Match demo_terrain_masking
+threat.add_radar(radar1);
 
-% Radar 2: Quarter way into map
-radar2_N = tm.bounds(1) + terrain_width * 0.25;
-radar2_E = tm.bounds(3) + (tm.bounds(4) - tm.bounds(3)) * 0.75;
-radar2_h = tm.get_height(radar2_N, radar2_E);
-radar2_pos = [radar2_N; radar2_E; radar2_h + 15];
-radar2 = radar_site(radar2_pos, 'Flank_Radar', 'search');
-radar2.R_max = min(demo_params.max_radar_range * 0.7, terrain_width * 0.1);  % Smaller, capped
-threat.add_radar(radar2);
-
-fprintf('Radar 1 at [%.0f, %.0f, %.0f], Range: %.0fm (DISABLED)\n', radar1_pos, radar1.R_max);
-fprintf('Radar 2 at [%.0f, %.0f, %.0f], Range: %.0fm\n', radar2_pos, radar2.R_max);
+fprintf('Radar at [%.0f, %.0f, %.0f] (Mountain Slope), Range: %.0fm\n', radar1_pos, radar1.R_max);
 
 % Compute Threat Map
 fprintf('Computing cumulative threat map (this may take a moment)...\n');
@@ -134,22 +130,17 @@ threat.compute_map();
 fprintf('\n--- module: PATH PLANNING (RRT*) ---\n');
 
 % Define Start and Goal relative to terrain bounds
-margin = 0.3;  % 10% margin from edges
-% Switch the start/goal coordinates (swap North/East)
-% Original positions (corner margins)
-sN = tm.bounds(1) + (tm.bounds(2) - tm.bounds(1)) * margin;
-sE = tm.bounds(3) + (tm.bounds(4) - tm.bounds(3)) * margin;
+% Start and Goal on opposite sides of the mountain (like demo_terrain_masking)
+% Start: West of mountain (near radar side)
+% Goal:  East of mountain (must flank around the peak)
+margin = 0.1;  % 10% margin from edges
 
-gN = tm.bounds(2) - (tm.bounds(2) - tm.bounds(1)) * margin;
-gE = tm.bounds(4) - (tm.bounds(4) - tm.bounds(3)) * margin;
-
-% Swap start and goal as requested
-start_N = gN;
-start_E = gE;
+start_N = tm.bounds(1) + (tm.bounds(2) - tm.bounds(1)) * margin;  % Near west edge
+start_E = mean(tm.bounds(3:4));  % Center E
 start_h = tm.get_height(start_N, start_E);
 
-goal_N = sN;
-goal_E = sE;
+goal_N = tm.bounds(2) - (tm.bounds(2) - tm.bounds(1)) * margin;   % Near east edge
+goal_E = mean(tm.bounds(3:4));   % Center E
 goal_h = tm.get_height(goal_N, goal_E);
 
 % Validate terrain heights
@@ -173,25 +164,25 @@ fprintf('Goal:  [%.0f, %.0f] at %.0fm AGL (Terrain: %.0fm MSL)\n', ...
 terrain_diagonal = sqrt((tm.bounds(2)-tm.bounds(1))^2 + (tm.bounds(4)-tm.bounds(3))^2);
 
 rrt_params = struct();
-rrt_params.max_iter = 6000;        % More iterations for larger terrain
-rrt_params.step_size = min(demo_params.max_step_size, ...
-                           max(demo_params.min_step_size, terrain_diagonal/15));
-rrt_params.min_clearance = demo_params.min_clearance;  % AGL minimum (increased for mountain terrain)
-rrt_params.goal_bias = 0.2;       % Slightly higher goal bias for faster convergence
-rrt_params.beta = 30;              % Use fixed radar cost weight (from RRT* fixes)
-rrt_params.shadow_bias = 0.4;      % Moderate shadow sampling bias
-rrt_params.max_flight_alt = demo_params.max_flight_alt;   % Higher for mountain terrain
-rrt_params.plot_interval = 500;    % Less frequent updates
-rrt_params.animate = true;        % Disable animation for speed
+rrt_params.max_iter = 3000;       % Enough iterations for good optimization
+% Adaptive step sizing: short near ridge, long in valley
+rrt_params.base_step_size = min(60, max(demo_params.min_step_size, terrain_diagonal/80));
+rrt_params.max_step_size = min(demo_params.max_step_size, rrt_params.base_step_size * 4);
+rrt_params.min_clearance = demo_params.min_clearance;
+rrt_params.goal_bias = 0.15;
+rrt_params.beta = 50;              % Strong radar avoidance — makes path go around
+rrt_params.shadow_bias = 0.4;      % Exploit terrain masking
+rrt_params.max_flight_alt = demo_params.max_flight_alt;
+rrt_params.plot_interval = 1000;
+rrt_params.animate = false;
 
-% CRITICAL: Reduce altitude cost to prevent terrain-following oscillations
-% High gamma causes RRT* to create many waypoints following terrain contours
-rrt_params.gamma = 0.02;           % LOW: Let trajectory smoother handle altitude
-rrt_params.preferred_alt = 150;    % HIGH: Prefer flying higher, fewer oscillations
-rrt_params.max_climb = 60;         % Allow steeper climbs (reduces switchbacks)
-rrt_params.max_descent = 55;       % Allow steeper descents
+% Climb-rate cost for smooth altitude profile
+rrt_params.gamma = 0.3;            % Moderate — allows some climbing
+rrt_params.max_climb = 60;         % Reasonable climb angle
+rrt_params.max_descent = 55;       % Reasonable descent angle
 
-fprintf('RRT* step_size: %.0fm (terrain diagonal: %.0fm)\n', rrt_params.step_size, terrain_diagonal);
+fprintf('RRT* step: %.0f–%.0fm adaptive (terrain diagonal: %.0fm)\n', ...
+    rrt_params.base_step_size, rrt_params.max_step_size, terrain_diagonal);
 
 % Setup Figure for RRT - simple single view
 fig_rrt = figure('Name', 'RRT* Path Planning', 'Position', [100, 100, 1000, 800]);
@@ -235,24 +226,31 @@ fprintf('Path simplified: %d -> %d waypoints (tolerance: %.0fm)\n', ...
     size(path_rrt, 2), size(path_simplified, 2), simplify_tol);
 
 % RRT Path is [3 x N] in NED
-% MinSnap inputs: [3 x N] Waypoints, Total Time
-% Heuristic for time: Average speed 15 m/s
+% MinSnap inputs: [3 x N] Waypoints
+% Time allocation handled by 3-stage hybrid optimizer (Mellinger closed-form)
+% optimizer inside trajectory_smoother — no manual avg_speed needed.
 path_len = 0;
 for i = 2:size(path_simplified, 2)
     path_len = path_len + norm(path_simplified(:,i) - path_simplified(:,i-1));
 end
-avg_speed = 5;  % Back to reasonable speed
-total_time = path_len / avg_speed;
-fprintf('Estimated flight time: %.1f s (Avg Speed: %.1f m/s)\n', total_time, avg_speed);
+fprintf('Path length: %.0f m\n', path_len);
 
 smooth_params = struct();
-smooth_params.v_max = 18;  % Reasonable max velocity
-smooth_params.dt = 0.05; % Coarse dt for fast calc, interpolation later if needed
-smooth_params.vel_bc_mode = 'bisector';  % 'free' or 'bisector' - bisector gives smoother turns
-smooth_params.cruise_speed = 12;  % Cruise speed for bisector mode [m/s]
-smooth_params.max_waypoints = 20;  % Limit to prevent minsnappolytraj conditioning issues
+smooth_params.v_max = 15;  % Maximum velocity [m/s] — faster for exciting visuals
+smooth_params.a_max = 6;   % Maximum acceleration [m/s^2]
+smooth_params.dt = 0.05;   % Coarse dt for fast calc
+smooth_params.vel_bc_mode = 'free';  % Optimizer chooses interior velocities
+smooth_params.cruise_speed = 10;  % Cruise speed [m/s]
+smooth_params.max_waypoints = 60;
+smooth_params.max_seg_length = 150;  % Max segment length [m]
+smooth_params.aggressiveness = 3.0;  % k_T=3 — aggressive but controlled
 
+% total_time is a hint — the optimizer will adjust it
+total_time = path_len / smooth_params.cruise_speed;
 traj_poly = trajectory_smoother(path_simplified, total_time, smooth_params);
+
+% Update total_time from the optimizer's output
+total_time = traj_poly.t(end);
 
 fprintf('Trajectory generated: %d points\n', length(traj_poly.t));
 fprintf('Max Vel: %.2f m/s, Max Acc: %.2f m/s^2\n', ...
