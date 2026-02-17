@@ -113,15 +113,30 @@ classdef threat_map < handle
             obj.computed = false;
         end
 
-        function compute_map(obj, method)
+        function compute_map(obj, method, opts)
             %COMPUTE_MAP Calculate risk at all grid points
             %   compute_map()        - Use 'max' combination
             %   compute_map('max')   - Max detection probability across radars
             %   compute_map('sum')   - Sum (can exceed 1, useful for cost)
             %   compute_map('prob')  - Probabilistic: 1 - prod(1-P_i)
+            %   compute_map('binary')- Deterministic visibility: 1 if visible
+            %   compute_map(method, opts)
+            %     opts.use_parallel - true/false, use parfor over altitude slices
+            %     opts.show_progress - true/false progress prints (serial mode)
 
             if nargin < 2
                 method = 'max';
+            end
+            if nargin < 3
+                opts = struct();
+            end
+
+            use_parallel = get_param(opts, 'use_parallel', false);
+            show_progress = get_param(opts, 'show_progress', true);
+            if use_parallel && ~can_use_parfor()
+                warning('threat_map:parforUnavailable', ...
+                    'Parallel Computing Toolbox not available. Falling back to serial.');
+                use_parallel = false;
             end
 
             if isempty(obj.radars)
@@ -136,61 +151,202 @@ classdef threat_map < handle
             n_E = length(obj.E_vec);
             n_alt = length(obj.alt_vec);
             total_cells = n_N * n_E * n_alt;
+            use_binary = strcmpi(method, 'binary');
+            n_rad_total = length(obj.radars);
+            n_rad = 0;
 
             % Initialize grid
             obj.risk_grid = zeros(n_E, n_N, n_alt);
 
-            % Progress counter
-            progress_interval = max(1, floor(total_cells / 20));
-            cell_count = 0;
+            % Cache radar parameters for faster binary visibility checks
+            if use_binary
+                n_rad = n_rad_total;
+                radar_enabled = false(1, n_rad);
+                radar_pos = zeros(3, n_rad);
+                radar_R2 = zeros(1, n_rad);
+                radar_az_limits = cell(1, n_rad);
+                radar_el_limits = cell(1, n_rad);
+                for r = 1:n_rad
+                    rd = obj.radars{r};
+                    radar_enabled(r) = rd.enabled;
+                    radar_pos(:, r) = rd.position(:);
+                    radar_R2(r) = rd.R_max^2;
+                    radar_az_limits{r} = rd.azimuth_limits;
+                    radar_el_limits{r} = rd.elevation_limits;
+                end
+            end
 
-            for k = 1:n_alt
-                alt = obj.alt_vec(k);
+            % Precompute terrain surface once (same for all altitudes)
+            [N_grid_2d, E_grid_2d] = meshgrid(obj.N_vec, obj.E_vec);
+            terrain_h_2d = obj.terrain.get_height(N_grid_2d(:), E_grid_2d(:));
+            terrain_h_2d = reshape(terrain_h_2d, [n_E, n_N]);
 
-                for j = 1:n_N
-                    N = obj.N_vec(j);
+            % Local broadcast variables for speed/parfor compatibility
+            N_vec_local = obj.N_vec;
+            E_vec_local = obj.E_vec;
+            alt_vec_local = obj.alt_vec;
+            radars_local = obj.radars;
+            los_local = obj.los;
+            rcs_local = obj.rcs;
 
-                    for i = 1:n_E
-                        E = obj.E_vec(i);
+            if use_parallel
+                fprintf('Parallel threat-map computation enabled (parfor).\n');
+                risk_local = zeros(n_E, n_N, n_alt);
 
-                        % Check if point is below terrain
-                        terrain_h = obj.terrain.get_height(N, E);
-                        if alt < terrain_h
-                            obj.risk_grid(i, j, k) = 1.0;  % Inside terrain = maximum risk
-                            continue;
+                parfor k = 1:n_alt
+                    alt = alt_vec_local(k);
+                    risk_slice = zeros(n_E, n_N);
+
+                    for j = 1:n_N
+                        N = N_vec_local(j);
+
+                        for i = 1:n_E
+                            E = E_vec_local(i);
+                            terrain_h = terrain_h_2d(i, j);
+                            if alt < terrain_h
+                                risk_slice(i, j) = 1.0;
+                                continue;
+                            end
+
+                            target_pos = [N; E; alt];
+
+                            if use_binary
+                                visible_any = false;
+                                for r = 1:n_rad
+                                    if ~radar_enabled(r)
+                                        continue;
+                                    end
+
+                                    rel = target_pos - radar_pos(:, r);
+                                    range2 = rel(1)^2 + rel(2)^2 + rel(3)^2;
+                                    if range2 > radar_R2(r)
+                                        continue;
+                                    end
+
+                                    if ~is_in_coverage_fast(rel, radar_az_limits{r}, radar_el_limits{r})
+                                        continue;
+                                    end
+
+                                    if ~isempty(los_local)
+                                        visible_any = los_local.has_los(radar_pos(:, r), target_pos);
+                                    else
+                                        visible_any = true;
+                                    end
+
+                                    if visible_any
+                                        break;
+                                    end
+                                end
+                                risk_slice(i, j) = double(visible_any);
+                            else
+                                P_det_list = zeros(1, n_rad_total);
+                                for r = 1:n_rad_total
+                                    P_det_list(r) = radars_local{r}.get_detection_probability(...
+                                        target_pos, rcs_local, los_local);
+                                end
+
+                                switch lower(method)
+                                    case 'max'
+                                        risk_slice(i, j) = max(P_det_list);
+                                    case 'sum'
+                                        risk_slice(i, j) = sum(P_det_list);
+                                    case 'prob'
+                                        risk_slice(i, j) = 1 - prod(1 - P_det_list);
+                                    otherwise
+                                        error('Unknown threat map method: %s', method);
+                                end
+                            end
                         end
+                    end
 
-                        target_pos = [N; E; alt];
+                    risk_local(:, :, k) = risk_slice;
+                end
 
-                        % Compute detection probability from each radar
-                        P_det_list = zeros(1, length(obj.radars));
-                        for r = 1:length(obj.radars)
-                            P_det_list(r) = obj.radars{r}.get_detection_probability(...
-                                target_pos, obj.rcs, obj.los);
-                        end
+                obj.risk_grid = risk_local;
+            else
+                progress_interval = max(1, floor(total_cells / 20));
+                cell_count = 0;
 
-                        % Combine probabilities
-                        switch lower(method)
-                            case 'max'
-                                obj.risk_grid(i, j, k) = max(P_det_list);
-                            case 'sum'
-                                obj.risk_grid(i, j, k) = sum(P_det_list);
-                            case 'prob'
-                                % Probability of detection by at least one radar
-                                obj.risk_grid(i, j, k) = 1 - prod(1 - P_det_list);
-                        end
+                for k = 1:n_alt
+                    alt = alt_vec_local(k);
 
-                        cell_count = cell_count + 1;
-                        if mod(cell_count, progress_interval) == 0
-                            fprintf('  Progress: %d%%\n', round(100*cell_count/total_cells));
+                    for j = 1:n_N
+                        N = N_vec_local(j);
+
+                        for i = 1:n_E
+                            E = E_vec_local(i);
+
+                            terrain_h = terrain_h_2d(i, j);
+                            if alt < terrain_h
+                                obj.risk_grid(i, j, k) = 1.0;
+                                continue;
+                            end
+
+                            target_pos = [N; E; alt];
+
+                            if use_binary
+                                visible_any = false;
+                                for r = 1:n_rad
+                                    if ~radar_enabled(r)
+                                        continue;
+                                    end
+
+                                    rel = target_pos - radar_pos(:, r);
+                                    range2 = rel(1)^2 + rel(2)^2 + rel(3)^2;
+                                    if range2 > radar_R2(r)
+                                        continue;
+                                    end
+
+                                    if ~is_in_coverage_fast(rel, radar_az_limits{r}, radar_el_limits{r})
+                                        continue;
+                                    end
+
+                                    if ~isempty(los_local)
+                                        visible_any = los_local.has_los(radar_pos(:, r), target_pos);
+                                    else
+                                        visible_any = true;
+                                    end
+
+                                    if visible_any
+                                        break;
+                                    end
+                                end
+                                obj.risk_grid(i, j, k) = double(visible_any);
+                            else
+                                P_det_list = zeros(1, n_rad_total);
+                                for r = 1:n_rad_total
+                                    P_det_list(r) = radars_local{r}.get_detection_probability(...
+                                        target_pos, rcs_local, los_local);
+                                end
+
+                                switch lower(method)
+                                    case 'max'
+                                        obj.risk_grid(i, j, k) = max(P_det_list);
+                                    case 'sum'
+                                        obj.risk_grid(i, j, k) = sum(P_det_list);
+                                    case 'prob'
+                                        obj.risk_grid(i, j, k) = 1 - prod(1 - P_det_list);
+                                    otherwise
+                                        error('Unknown threat map method: %s', method);
+                                end
+                            end
+
+                            cell_count = cell_count + 1;
+                            if show_progress && mod(cell_count, progress_interval) == 0
+                                fprintf('  Progress: %d%%\n', round(100*cell_count/total_cells));
+                            end
                         end
                     end
                 end
             end
 
             % Create interpolant for fast queries
+            interp_method = 'linear';
+            if strcmpi(method, 'binary')
+                interp_method = 'nearest';
+            end
             obj.F_interp = griddedInterpolant({obj.E_vec, obj.N_vec, obj.alt_vec}, ...
-                                               obj.risk_grid, 'linear', 'nearest');
+                                               obj.risk_grid, interp_method, 'nearest');
 
             obj.computed = true;
             fprintf('Threat map computed.\n');
@@ -419,6 +575,99 @@ classdef threat_map < handle
             title('Integrated Risk Exposure');
             grid on;
         end
+
+        function [class_slice, alt_used] = get_binary_horizontal_slice(obj, alt_query, visibility_threshold, terrain_obj, terrain_h_grid)
+            %GET_BINARY_HORIZONTAL_SLICE Return 3-class horizontal binary slice.
+            %   class values:
+            %     1 -> below terrain
+            %     2 -> hidden/safe
+            %     3 -> visible
+
+            if nargin < 3 || isempty(visibility_threshold)
+                visibility_threshold = 0.5;
+            end
+            if nargin < 4 || isempty(terrain_obj)
+                terrain_obj = obj.terrain;
+            end
+            if nargin < 5
+                terrain_h_grid = [];
+            end
+
+            if ~obj.computed
+                error('Threat map not computed. Call compute_map() first.');
+            end
+
+            [~, alt_idx] = min(abs(obj.alt_vec - alt_query));
+            alt_used = obj.alt_vec(alt_idx);
+            risk_slice = obj.risk_grid(:, :, alt_idx);
+
+            class_slice = 2 * ones(size(risk_slice));  % hidden/safe
+            class_slice(risk_slice >= visibility_threshold) = 3; % visible
+
+            if isempty(terrain_h_grid)
+                [N_grid, E_grid] = meshgrid(obj.N_vec, obj.E_vec);
+                terrain_h_grid = terrain_obj.get_height(N_grid(:), E_grid(:));
+                terrain_h_grid = reshape(terrain_h_grid, size(N_grid));
+            end
+            class_slice(alt_used < terrain_h_grid) = 1; % below terrain
+        end
+
+        function [class_grid, s_vec, alt_vec, terrain_line, N_line, E_line] = ...
+                get_binary_vertical_slice(obj, anchor_NE, heading_rad, half_length, n_horiz, alt_vec, visibility_threshold, terrain_obj)
+            %GET_BINARY_VERTICAL_SLICE Return 3-class vertical slice along heading.
+            %   class values:
+            %     1 -> below terrain
+            %     2 -> hidden/safe
+            %     3 -> visible
+            %
+            % Inputs:
+            %   anchor_NE  : [2x1] [N;E] slice center
+            %   heading_rad: heading angle in radians (atan2(dE,dN))
+
+            if nargin < 4 || isempty(half_length)
+                half_length = 2500;
+            end
+            if nargin < 5 || isempty(n_horiz)
+                n_horiz = 181;
+            end
+            if nargin < 6 || isempty(alt_vec)
+                alt_vec = obj.alt_vec;
+            end
+            if nargin < 7 || isempty(visibility_threshold)
+                visibility_threshold = 0.5;
+            end
+            if nargin < 8 || isempty(terrain_obj)
+                terrain_obj = obj.terrain;
+            end
+
+            if ~obj.computed
+                error('Threat map not computed. Call compute_map() first.');
+            end
+
+            anchor_NE = anchor_NE(:);
+            if numel(anchor_NE) ~= 2
+                error('anchor_NE must be [2x1] as [N;E].');
+            end
+
+            s_vec = linspace(-half_length, half_length, n_horiz);
+            N_line = anchor_NE(1) + s_vec * cos(heading_rad);
+            E_line = anchor_NE(2) + s_vec * sin(heading_rad);
+            terrain_line = terrain_obj.get_height(N_line, E_line);
+            terrain_line = reshape(terrain_line, 1, []); % force row [1 x n_horiz]
+
+            [S_grid, A_grid] = meshgrid(s_vec, alt_vec);
+            N_query = anchor_NE(1) + S_grid * cos(heading_rad);
+            E_query = anchor_NE(2) + S_grid * sin(heading_rad);
+
+            risk = obj.get_risk(N_query(:), E_query(:), A_grid(:));
+            risk = reshape(risk, size(S_grid));
+
+            class_grid = 2 * ones(size(risk)); % hidden/safe
+            class_grid(risk >= visibility_threshold) = 3; % visible
+            % Build below-terrain mask with explicit broadcasting safety.
+            below_mask = bsxfun(@lt, alt_vec(:), terrain_line); % [n_alt x n_horiz]
+            class_grid(below_mask) = 1; % below terrain
+        end
     end
 end
 
@@ -428,4 +677,33 @@ function val = get_param(params, name, default)
     else
         val = default;
     end
+end
+
+function in_coverage = is_in_coverage_fast(rel_pos, az_limits, el_limits)
+    % Fast equivalent of radar_site.is_in_coverage for binary map evaluation.
+    in_coverage = true;
+
+    range_horiz = hypot(rel_pos(1), rel_pos(2));
+    azimuth = atan2d(rel_pos(2), rel_pos(1));
+    elevation = atan2d(rel_pos(3), range_horiz);
+
+    if ~isempty(az_limits)
+        az_min = az_limits(1);
+        az_max = az_limits(2);
+        if az_min <= az_max
+            in_coverage = in_coverage && (azimuth >= az_min && azimuth <= az_max);
+        else
+            in_coverage = in_coverage && (azimuth >= az_min || azimuth <= az_max);
+        end
+    end
+
+    if ~isempty(el_limits)
+        in_coverage = in_coverage && ...
+            (elevation >= el_limits(1) && elevation <= el_limits(2));
+    end
+end
+
+function tf = can_use_parfor()
+    tf = license('test', 'Distrib_Computing_Toolbox') && ...
+         (exist('parfor', 'builtin') > 0 || exist('parfor', 'file') > 0);
 end

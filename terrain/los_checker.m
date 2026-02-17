@@ -9,6 +9,7 @@ classdef los_checker < handle
 %   get_los_fraction(p1, p2)  - Get fraction of path that has LOS
 %   find_visible_cells(pos)   - Find all visible cells from a position
 %   get_masking_angle(pos, dir) - Get terrain masking angle in direction
+%   (optional) mesh-based LOS using Moller-Trumbore ray intersection
 %
 % Example:
 %   terrain_data = terrain_generator('ridge');
@@ -29,26 +30,70 @@ classdef los_checker < handle
         terrain         % terrain_map object
         sample_spacing  % Spacing between LOS check samples [m]
         clearance       % Minimum clearance above terrain for LOS [m]
+        use_mesh        % Use terrain_mesh ray intersection for LOS
+        mesh            % terrain_mesh object (optional)
+        los_eps         % Endpoint tolerance for mesh LOS [m]
     end
 
     methods
-        function obj = los_checker(terrain_map_obj, sample_spacing, clearance)
+        function obj = los_checker(terrain_map_obj, sample_spacing, clearance, params)
             %LOS_CHECKER Constructor
             %   los = los_checker(terrain_map) - Use default spacing
             %   los = los_checker(terrain_map, spacing, clearance)
+            %   los = los_checker(terrain_map, spacing, clearance, params)
+            %
+            %   params fields (optional):
+            %     .use_mesh - true/false (default: false)
+            %     .mesh     - pre-built terrain_mesh object
+            %     .los_eps  - endpoint tolerance for mesh LOS [m] (default: 0.5)
+
+            if nargin < 2
+                sample_spacing = [];
+            end
+            if nargin < 3
+                clearance = [];
+            end
+            if nargin < 4
+                params = struct();
+            end
+
+            % Allow compact call: los_checker(tm, struct(...))
+            if isstruct(sample_spacing)
+                params = sample_spacing;
+                sample_spacing = [];
+                clearance = [];
+            end
 
             obj.terrain = terrain_map_obj;
 
-            if nargin < 2
+            if isempty(sample_spacing)
                 obj.sample_spacing = terrain_map_obj.resolution;
             else
                 obj.sample_spacing = sample_spacing;
             end
 
-            if nargin < 3
+            if isempty(clearance)
                 obj.clearance = 1.0;  % 1m default clearance
             else
                 obj.clearance = clearance;
+            end
+
+            obj.use_mesh = get_param(params, 'use_mesh', false);
+            obj.mesh = [];
+            obj.los_eps = get_param(params, 'los_eps', 0.5);
+
+            if obj.use_mesh
+                if isfield(params, 'mesh') && ~isempty(params.mesh)
+                    obj.mesh = params.mesh;
+                else
+                    terrain_data = struct();
+                    terrain_data.N_vec = terrain_map_obj.N_vec;
+                    terrain_data.E_vec = terrain_map_obj.E_vec;
+                    terrain_data.Z = terrain_map_obj.Z;
+                    terrain_data.bounds = terrain_map_obj.bounds;
+                    terrain_data.resolution = terrain_map_obj.resolution;
+                    obj.mesh = terrain_mesh(terrain_data);
+                end
             end
         end
 
@@ -64,6 +109,12 @@ classdef los_checker < handle
 
             p1 = p1(:);
             p2 = p2(:);
+
+            % Fast path: mesh-based intersection (Moller-Trumbore)
+            if obj.use_mesh && ~isempty(obj.mesh)
+                [visible, blocked_at] = obj.has_los_mesh(p1, p2);
+                return;
+            end
 
             % Distance between points
             dist = norm(p2 - p1);
@@ -107,6 +158,55 @@ classdef los_checker < handle
             end
         end
 
+        function [visible, blocked_at] = has_los_mesh(obj, p1, p2)
+            %HAS_LOS_MESH LOS check using mesh ray intersection
+            % Applies clearance by shifting the LOS line downward.
+
+            p1 = p1(:);
+            p2 = p2(:);
+            direction = p2 - p1;
+            dist = norm(direction);
+
+            if dist < 1e-6
+                visible = true;
+                blocked_at = nan(3, 1);
+                return;
+            end
+
+            % Clearance handling: line must stay above terrain + clearance.
+            % Equivalent test: shifted line intersects raw terrain.
+            p1_shift = p1;
+            p2_shift = p2;
+            if obj.clearance > 0
+                p1_shift(3) = p1_shift(3) - obj.clearance;
+                p2_shift(3) = p2_shift(3) - obj.clearance;
+            end
+            dir_shift = p2_shift - p1_shift;
+            dist_shift = norm(dir_shift);
+
+            % Quick accept: entire LOS segment is above highest terrain.
+            if min(p1_shift(3), p2_shift(3)) > (obj.mesh.bounds(6) + obj.los_eps)
+                visible = true;
+                blocked_at = nan(3, 1);
+                return;
+            end
+
+            [hit, intersection_pt, hit_dist] = obj.mesh.ray_intersect(p1_shift, dir_shift, dist_shift);
+
+            % Ignore numerical hits very close to endpoints.
+            if ~hit || hit_dist <= obj.los_eps || (dist_shift - hit_dist) <= obj.los_eps
+                visible = true;
+                blocked_at = nan(3, 1);
+                return;
+            end
+
+            visible = false;
+            blocked_at = intersection_pt;
+            if obj.clearance > 0
+                blocked_at(3) = blocked_at(3) + obj.clearance;
+            end
+        end
+
         function fraction = get_los_fraction(obj, p1, p2)
             %GET_LOS_FRACTION Get fraction of path with clear LOS
             %   fraction = get_los_fraction(p1, p2)
@@ -115,6 +215,12 @@ classdef los_checker < handle
 
             p1 = p1(:);
             p2 = p2(:);
+
+            % Fast path: mesh-based visibility fraction
+            if obj.use_mesh && ~isempty(obj.mesh)
+                fraction = obj.get_los_fraction_mesh(p1, p2);
+                return;
+            end
 
             dist = norm(p2 - p1);
             if dist < obj.sample_spacing
@@ -134,6 +240,69 @@ classdef los_checker < handle
             visible_mask = alt >= (terrain_h + obj.clearance);
 
             fraction = sum(visible_mask) / n_samples;
+        end
+
+        function fraction = get_los_fraction_mesh(obj, p1, p2)
+            %GET_LOS_FRACTION_MESH Visibility fraction using mesh intersections
+
+            p1 = p1(:);
+            p2 = p2(:);
+
+            % Apply clearance by downward shift (same convention as has_los_mesh)
+            p1_shift = p1;
+            p2_shift = p2;
+            if obj.clearance > 0
+                p1_shift(3) = p1_shift(3) - obj.clearance;
+                p2_shift(3) = p2_shift(3) - obj.clearance;
+            end
+
+            direction = p2_shift - p1_shift;
+            dist = norm(direction);
+            if dist < 1e-6
+                fraction = 1.0;
+                return;
+            end
+
+            [n_hits, ~, distances, ~] = obj.mesh.ray_intersect_all(p1_shift, direction, dist);
+            if n_hits <= 0 || isempty(distances)
+                fraction = 1.0;
+                return;
+            end
+
+            % Keep only interior intersections and merge near-duplicates
+            distances = sort(distances(:)');
+            interior = distances(distances > obj.los_eps & distances < (dist - obj.los_eps));
+            d_unique = unique_tol(interior, obj.los_eps);
+
+            if isempty(d_unique)
+                fraction = 1.0;
+                return;
+            end
+
+            % Determine whether the shifted start point is inside terrain
+            h0 = obj.terrain.get_height(p1_shift(1), p1_shift(2));
+            is_blocked = false;
+            if ~isnan(h0)
+                is_blocked = p1_shift(3) < h0;
+            end
+
+            visible_len = 0;
+            prev_d = 0;
+            for i = 1:length(d_unique)
+                d = d_unique(i);
+                if ~is_blocked
+                    visible_len = visible_len + max(0, d - prev_d);
+                end
+                is_blocked = ~is_blocked;
+                prev_d = d;
+            end
+
+            if ~is_blocked
+                visible_len = visible_len + max(0, dist - prev_d);
+            end
+
+            fraction = visible_len / dist;
+            fraction = max(0, min(1, fraction));
         end
 
         function [visible_grid, N_grid, E_grid] = find_visible_area(obj, observer_pos, grid_alt, bounds)
@@ -306,6 +475,12 @@ classdef los_checker < handle
             end
             direction = direction / dir_norm;
 
+            % Fast path: mesh-based intersection
+            if obj.use_mesh && ~isempty(obj.mesh)
+                [intersects, intersection_pt, distance] = obj.mesh.ray_intersect(origin, direction, max_range);
+                return;
+            end
+
             % Use half the terrain resolution for stepping
             step = obj.sample_spacing / 2;
             n_steps = ceil(max_range / step);
@@ -391,6 +566,29 @@ classdef los_checker < handle
             end
 
             shadow_map = ~visible_from_radar;
+        end
+    end
+end
+
+function val = get_param(params, name, default)
+    if isfield(params, name)
+        val = params.(name);
+    else
+        val = default;
+    end
+end
+
+function vals_out = unique_tol(vals_in, tol)
+    if isempty(vals_in)
+        vals_out = vals_in;
+        return;
+    end
+
+    vals_in = sort(vals_in(:)');
+    vals_out = vals_in(1);
+    for i = 2:length(vals_in)
+        if abs(vals_in(i) - vals_out(end)) > tol
+            vals_out(end+1) = vals_in(i); %#ok<AGROW>
         end
     end
 end

@@ -6,6 +6,7 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
 %   - Log-Barrier radar cost function
 %   - Informed RRT* sampling (ellipsoidal)
 %   - Shadow Zone sampling bias
+%   - Optional hard radar visibility constraint (binary safe/unsafe)
 %
 % Inputs:
 %   start   - [3x1] start position [N; E; D] in NED frame
@@ -31,21 +32,67 @@ max_step_size = get_param(params, 'max_step_size', base_step_size * 3);
 goal_bias = get_param(params, 'goal_bias', 0.1);
 rewire_radius = get_param(params, 'rewire_radius', base_step_size * 3);  % Must be > step_size
 alpha = get_param(params, 'alpha', 1.2);        % Distance weight
-beta = get_param(params, 'beta', 100);         % Radar cost weight
-gamma = get_param(params, 'gamma', 0.1);        % Climb-rate cost weight
+beta = get_param(params, 'beta', 100);          % Radar cost weight
+gamma = get_param(params, 'gamma', 0.3);        % Preferred-AGL penalty weight
 min_clearance = get_param(params, 'min_clearance', 20);
+preferred_agl = get_param(params, 'preferred_agl', max(min_clearance + 20, 60));
 max_climb = get_param(params, 'max_climb', 30);
 max_descent = get_param(params, 'max_descent', 30);
 
 % Shadow sampling bias (probability to reject visible points)
-shadow_bias = 0.7;
+shadow_bias = get_param(params, 'shadow_bias', 0.7);
+animate = get_param(params, 'animate', false);
+plot_interval = max(1, round(get_param(params, 'plot_interval', 200)));
+
+% Binary visibility mode (visible points/edges become invalid)
+radar_hard_constraint = get_param(params, 'radar_hard_constraint', false);
+radar_visibility_threshold = get_param(params, 'radar_visibility_threshold', 0.5);
+
+% Optional live plotting handles
+anim_axes = [];
+if animate
+    if isfield(params, 'anim_axes') && ~isempty(params.anim_axes) && isgraphics(params.anim_axes, 'axes')
+        anim_axes = params.anim_axes;
+    elseif isfield(params, 'anim_fig') && ~isempty(params.anim_fig) && isgraphics(params.anim_fig, 'figure')
+        anim_axes = get(params.anim_fig, 'CurrentAxes');
+    end
+
+    if isempty(anim_axes) || ~isgraphics(anim_axes, 'axes')
+        anim_fig = figure('Name', 'RRT* Live', 'Position', [120, 120, 1000, 760]);
+        anim_axes = axes('Parent', anim_fig);
+        hold(anim_axes, 'on'); grid(anim_axes, 'on');
+        xlabel(anim_axes, 'North [m]');
+        ylabel(anim_axes, 'East [m]');
+        zlabel(anim_axes, 'Altitude [m]');
+        view(anim_axes, 35, 30);
+    end
+    hold(anim_axes, 'on');
+    h_tree = plot3(anim_axes, nan, nan, nan, '-', 'Color', [0.15 0.55 1.0], 'LineWidth', 0.8, ...
+        'DisplayName', 'RRT* Tree');
+    h_best = plot3(anim_axes, nan, nan, nan, 'm-', 'LineWidth', 2.4, 'DisplayName', 'Best Path');
+else
+    h_tree = [];
+    h_best = [];
+end
 
 % Get bounds
 if isfield(params, 'bounds')
     bounds = params.bounds;
 else
     tb = terrain.bounds;
-    bounds = [tb(1), tb(2), tb(3), tb(4), -500, -min_clearance];
+    % Altitude bounds in NED-D should follow terrain elevation scale.
+    if isprop(terrain, 'Z')
+        terrain_min = min(terrain.Z(:));
+        terrain_max = max(terrain.Z(:));
+    else
+        % Conservative fallback when Z is unavailable
+        terrain_min = 0;
+        terrain_max = 500;
+    end
+    max_flight_alt = get_param(params, 'max_flight_alt', 500);
+    min_alt = terrain_min + min_clearance;
+    max_alt = terrain_max + max_flight_alt;
+    bounds = [tb(1), tb(2), tb(3), tb(4), -max_alt, -min_alt];
 end
 
 start = start(:);
@@ -66,6 +113,7 @@ C = rotation_matrix_3d(start, goal);
 
 % Main RRT* loop
 for iter = 1:max_iter
+    goal_updated_this_iter = false;
 
     % Informed Sampling Logic
     c_best = inf;
@@ -79,7 +127,8 @@ for iter = 1:max_iter
     else
         % Informed sampling with shadow bias
         q_rand = sample_informed(bounds, terrain, threat, min_clearance, ...
-            start, goal, c_best, c_min, x_center, C, shadow_bias);
+            start, goal, c_best, c_min, x_center, C, shadow_bias, ...
+            radar_hard_constraint, radar_visibility_threshold);
     end
 
     % Find nearest node
@@ -100,9 +149,9 @@ for iter = 1:max_iter
         continue;
     end
 
-    % Compute Cost (Dynamic RCS + Log-Barrier + Climb-Rate)
+    % Compute Cost (Distance + Radar + Preferred AGL)
     edge_cost = compute_edge_cost(q_near, q_new, terrain, threat, ...
-        alpha, beta, gamma);
+        alpha, beta, gamma, preferred_agl, radar_hard_constraint, radar_visibility_threshold);
 
     if isinf(edge_cost)
         continue; % Skip if P_det is too high (near 1.0)
@@ -123,7 +172,7 @@ for iter = 1:max_iter
 
         if is_edge_valid(q_candidate, q_new, terrain, min_clearance)
             cand_edge_cost = compute_edge_cost(q_candidate, q_new, ...
-                terrain, threat, alpha, beta, gamma);
+                terrain, threat, alpha, beta, gamma, preferred_agl, radar_hard_constraint, radar_visibility_threshold);
             cand_cost = costs(idx) + cand_edge_cost;
 
             if cand_cost < best_cost
@@ -149,7 +198,7 @@ for iter = 1:max_iter
 
         if is_edge_valid(q_new, q_near_node, terrain, min_clearance)
             rew_edge_cost = compute_edge_cost(q_new, q_near_node, ...
-                terrain, threat, alpha, beta, gamma);
+                terrain, threat, alpha, beta, gamma, preferred_agl, radar_hard_constraint, radar_visibility_threshold);
             rew_cost = costs(new_idx) + rew_edge_cost;
 
             if rew_cost < costs(idx)
@@ -173,7 +222,8 @@ for iter = 1:max_iter
     if dist_to_goal < goal_tolerance
         % Add exact connection to goal if valid
         if is_edge_valid(q_new, goal, terrain, min_clearance)
-            last_edge = compute_edge_cost(q_new, goal, terrain, threat, alpha, beta, gamma);
+            last_edge = compute_edge_cost(q_new, goal, terrain, threat, alpha, beta, gamma, preferred_agl, ...
+                radar_hard_constraint, radar_visibility_threshold);
             total_goal_cost = costs(new_idx) + last_edge;
 
             if ~goal_reached
@@ -184,11 +234,13 @@ for iter = 1:max_iter
                 costs(goal_node_idx) = total_goal_cost;
                 goal_reached = true;
                 fprintf('Goal reached at iter %d! Cost: %.2f\n', iter, total_goal_cost);
+                goal_updated_this_iter = true;
             elseif total_goal_cost < costs(goal_node_idx)
                 % Better path found: UPDATE existing goal node (don't add new one)
                 parents(goal_node_idx) = new_idx;
                 costs(goal_node_idx) = total_goal_cost;
                 fprintf('Goal improved at iter %d! Cost: %.2f\n', iter, total_goal_cost);
+                goal_updated_this_iter = true;
             end
         end
     end
@@ -196,6 +248,26 @@ for iter = 1:max_iter
     if mod(iter, 500) == 0
         fprintf('RRT* iter %d, tree: %d, best cost: %.2f\n', iter, size(nodes, 2), ternary(isinf(c_best), NaN, c_best));
     end
+
+    if animate && isgraphics(anim_axes, 'axes') && (mod(iter, plot_interval) == 0 || goal_updated_this_iter)
+        [x_tree, y_tree, z_tree] = build_tree_lines(nodes, parents);
+        set(h_tree, 'XData', x_tree, 'YData', y_tree, 'ZData', z_tree);
+
+        if goal_reached && goal_node_idx > 0
+            path_live = extract_path(nodes, parents, goal_node_idx);
+            set(h_best, 'XData', path_live(1, :), 'YData', path_live(2, :), 'ZData', -path_live(3, :));
+        end
+
+        title(anim_axes, sprintf('RRT* Live | iter=%d | tree=%d | best cost=%.2f', ...
+            iter, size(nodes, 2), ternary(isinf(c_best), NaN, c_best)));
+        drawnow limitrate nocallbacks;
+    end
+end
+
+if animate && isgraphics(anim_axes, 'axes')
+    [x_tree, y_tree, z_tree] = build_tree_lines(nodes, parents);
+    set(h_tree, 'XData', x_tree, 'YData', y_tree, 'ZData', z_tree);
+    drawnow;
 end
 
 % Extract path
@@ -231,7 +303,7 @@ end
 
 %% Helper Functions
 
-function q = sample_informed(bounds, terrain, threat, min_clearance, start, goal, c_best, c_min, x_center, C, shadow_bias)
+function q = sample_informed(bounds, terrain, threat, min_clearance, start, goal, c_best, c_min, x_center, C, shadow_bias, radar_hard_constraint, radar_visibility_threshold)
 % Informed sampling with shadow bias
 
 max_attempts = 100;
@@ -258,23 +330,24 @@ for k = 1:max_attempts
         continue;
     end
 
-    % Check shadow bias
-    % If point is visible to radar, reject it with probability shadow_bias
-    % unless we really struggle to find points
-    if ~isempty(threat) && threat.computed && rand < shadow_bias
+    % Check shadow bias / hard visibility constraint
+    if ~isempty(threat) && threat.computed
         alt = -cand(3);
         terrain_h = terrain.get_height(cand(1), cand(2));
         if alt > terrain_h + min_clearance
-            visible_to_any = false;
-            for i = 1:length(threat.radars)
-                radar = threat.radars{i};
-                if threat.los.has_los(radar.position, [cand(1); cand(2); alt])
-                    visible_to_any = true;
-                    break;
-                end
+            point_risk = 0;
+            try
+                point_risk = threat.get_risk(cand(1), cand(2), alt);
+            catch
+                point_risk = 0;
+            end
+            visible_to_any = point_risk >= radar_visibility_threshold;
+
+            if radar_hard_constraint && visible_to_any
+                continue; % Never sample visible points in hard mode
             end
 
-            if visible_to_any
+            if ~radar_hard_constraint && rand < shadow_bias && visible_to_any
                 continue; % Reject visible point to favor shadow
             end
         end
@@ -293,6 +366,39 @@ end
 N = bounds(1) + rand * (bounds(2) - bounds(1));
 E = bounds(3) + rand * (bounds(4) - bounds(3));
 q = [N; E; -(terrain.get_height(N, E) + min_clearance + 20)];
+end
+
+function [x, y, z] = build_tree_lines(nodes, parents)
+% Build NaN-separated line arrays for fast tree plotting.
+
+n_nodes = size(nodes, 2);
+if n_nodes < 2
+    x = nan; y = nan; z = nan;
+    return;
+end
+
+child_idx = 2:n_nodes;
+par_idx = parents(child_idx);
+valid = par_idx > 0;
+child_idx = child_idx(valid);
+par_idx = par_idx(valid);
+
+if isempty(child_idx)
+    x = nan; y = nan; z = nan;
+    return;
+end
+
+n_edges = numel(child_idx);
+x = nan(1, 3 * n_edges);
+y = nan(1, 3 * n_edges);
+z = nan(1, 3 * n_edges);
+
+x(1:3:end) = nodes(1, par_idx);
+x(2:3:end) = nodes(1, child_idx);
+y(1:3:end) = nodes(2, par_idx);
+y(2:3:end) = nodes(2, child_idx);
+z(1:3:end) = -nodes(3, par_idx);
+z(2:3:end) = -nodes(3, child_idx);
 end
 
 function x = sample_unit_ball()
@@ -322,12 +428,8 @@ else
 end
 end
 
-function cost = compute_edge_cost(q1, q2, terrain, threat, alpha, beta, gamma)
-% Edge cost = distance + radar (log-barrier + dynamic RCS) + climb-rate
-%
-% The climb-rate cost penalizes the climb angle squared, encouraging
-% smooth altitude profiles regardless of terrain. This replaces the
-% former preferred_alt penalty which was terrain-agnostic.
+function cost = compute_edge_cost(q1, q2, terrain, threat, alpha, beta, gamma, preferred_agl, radar_hard_constraint, radar_visibility_threshold)
+% Edge cost = distance + radar (log-barrier + dynamic RCS) + preferred AGL
 
 dist = norm(q2 - q1);
 if dist < 1e-6
@@ -358,6 +460,16 @@ if ~isempty(threat) && threat.computed
             P_base = threat.get_risk(q(1), q(2), alt);
         catch
             P_base = 0;
+        end
+
+        % In hard mode, any visible sample invalidates the edge
+        if radar_hard_constraint && P_base >= radar_visibility_threshold
+            cost = inf;
+            return;
+        end
+
+        if radar_hard_constraint
+            continue;
         end
 
         % Dynamic RCS Factor - Find nearest radar and compute aspect angle
@@ -393,31 +505,26 @@ if ~isempty(threat) && threat.computed
     cost_radar = beta * sum_log_prob * (dist / n_samples);
 end
 
-% --- Climb-rate cost (AGL-based: penalizes changes relative to terrain) ---
-cost_climb = 0;
+% --- Preferred altitude (AGL) cost ---
+cost_alt = 0;
 if gamma > 0
-    % Use AGL (above-ground-level) so terrain-following gets no penalty
-    alt1 = -q1(3);
-    alt2 = -q2(3);
-    terrain_h1 = terrain.get_height(q1(1), q1(2));
-    terrain_h2 = terrain.get_height(q2(1), q2(2));
-    agl1 = alt1 - terrain_h1;
-    agl2 = alt2 - terrain_h2;
-
-    delta_agl = abs(agl2 - agl1);  % AGL change, not MSL
-    horiz_dist = norm(q2(1:2) - q1(1:2));
-
-    if horiz_dist > 1e-3
-        climb_angle = atan2(delta_agl, horiz_dist);  % [rad]
-    else
-        climb_angle = pi/2;  % Pure vertical move
+    n_alt_samples = max(2, ceil(dist / 20));
+    err_sq_sum = 0;
+    agl_scale = max(preferred_agl, 1);
+    for i = 1:n_alt_samples
+        t = (i - 1) / (n_alt_samples - 1);
+        q = q1 + t * (q2 - q1);
+        alt = -q(3);
+        terrain_h = terrain.get_height(q(1), q(2));
+        agl = alt - terrain_h;
+        err_norm = (agl - preferred_agl) / agl_scale;
+        err_sq_sum = err_sq_sum + err_norm^2;
     end
-
-    % Quadratic penalty: gentle AGL changes ~free, steep AGL changes expensive
-    cost_climb = gamma * dist * (climb_angle)^2;
+    mean_err_sq = err_sq_sum / n_alt_samples;
+    cost_alt = gamma * dist * mean_err_sq;
 end
 
-cost = cost_dist + cost_radar + cost_climb;
+cost = cost_dist + cost_radar + cost_alt;
 end
 
 % Standard Helper Functions (find_nearest, steer, etc)

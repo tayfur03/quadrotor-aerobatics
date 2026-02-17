@@ -27,6 +27,7 @@ demo_params.dem_file = 'DEM/artvin.tif';  % Ignored when use_synthetic=true
 demo_params.use_synthetic = true;           % Use synthetic terrain
 demo_params.adaptive_res_target = 150;       % Max grid dimension for viz
 demo_params.animate = true;
+demo_params.use_parallel_threat = true;
 
 % Scale-adaptive parameters
 demo_params.max_threat_cells = 25000;
@@ -99,7 +100,7 @@ alt_max = terrain_max + demo_params.max_flight_alt;
 fprintf('Threat Map Altitude Range: [%.0f, %.0f] m (terrain %.0f..%.0f)\n', ...
     alt_min, alt_max, terrain_min, terrain_max);
 
-los = los_checker(tm);
+los = los_checker(tm, struct('use_mesh', true, 'mesh', mesh, 'los_eps', 1.0));
 threat = threat_map(tm, los, 0.1, struct('resolution', map_res, 'alt_range', [alt_min, alt_max])); 
 
 % --- Auto-calculate positions based on terrain bounds ---
@@ -124,7 +125,7 @@ fprintf('Radar at [%.0f, %.0f, %.0f] (Mountain Slope), Range: %.0fm\n', radar1_p
 
 % Compute Threat Map
 fprintf('Computing cumulative threat map (this may take a moment)...\n');
-threat.compute_map();
+threat.compute_map('max', struct('use_parallel', demo_params.use_parallel_threat, 'show_progress', true));
 
 %% 4. Geometric Path Planning (RRT*)
 fprintf('\n--- module: PATH PLANNING (RRT*) ---\n');
@@ -176,8 +177,9 @@ rrt_params.max_flight_alt = demo_params.max_flight_alt;
 rrt_params.plot_interval = 1000;
 rrt_params.animate = false;
 
-% Climb-rate cost for smooth altitude profile
-rrt_params.gamma = 0.3;            % Moderate — allows some climbing
+% Preferred AGL cost for smoother altitude profile
+rrt_params.gamma = 0.3;            % Moderate preferred-AGL tracking
+rrt_params.preferred_agl = 70;     % Target altitude above terrain [m]
 rrt_params.max_climb = 60;         % Reasonable climb angle
 rrt_params.max_descent = 55;       % Reasonable descent angle
 
