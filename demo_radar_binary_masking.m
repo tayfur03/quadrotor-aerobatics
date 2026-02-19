@@ -18,10 +18,10 @@ fprintf('=== Binary Radar Masking Demo ===\n');
 
 %% 0) Configuration
 cfg = struct();
-cfg.dem_file = 'DEM/agri.tif';          % Any local DEM/*.tif
+cfg.dem_file = 'DEM/artvin.tif';          % Any local DEM/*.tif
 cfg.dem_target_resolution = 50;           % [m] downsample for speed
 cfg.dem_fill_nodata = 'nearest';
-cfg.dem_crop_half_size = 2500;            % Crop around DEM center [m]
+cfg.dem_crop_half_size = 4000;            % Crop around DEM center [m]
 cfg.use_mesh_los_threat = false;          % Faster for dense threat-map computation
 cfg.use_mesh_los_verify = true;           % Keep precise LOS for final path checks
 cfg.mesh_los_eps = 0.75;
@@ -152,11 +152,17 @@ start_pos = [start_NE; -(start_h + start_agl)];
 goal_pos = [goal_NE; -(goal_h + goal_agl)];
 
 planner_params = struct();
-planner_params.max_iter = 4500;
-planner_params.base_step_size = max(30, min(90, diag_len / 70));
-planner_params.max_step_size = planner_params.base_step_size * 3;
+planner_params.max_iter = cfg.dem_crop_half_size * 6;  % Scale max iterations with terrain size
+planner_params.base_step_size = max(30, min(75, diag_len / 85));
+planner_params.max_step_size = planner_params.base_step_size * 3.5;
 planner_params.rewire_radius = planner_params.base_step_size * 2.8;
-planner_params.goal_bias = 0.2;
+planner_params.rewire_mode = 'fixed';  % 'fixed' | 'dynamic' | 'knearest'
+planner_params.rewire_k_const = 3.2 * exp(1) * (1 + 1/3);
+planner_params.rewire_k_min = 28;
+planner_params.rewire_k_max = 320;
+
+planner_params.goal_bias = 0.15;
+planner_params.goal_bias_after_goal = 0.04;
 planner_params.min_clearance = 20;
 planner_params.max_flight_alt = 500;
 planner_params.alpha = 1.0;
@@ -164,6 +170,7 @@ planner_params.beta = 0.0; % no probabilistic radar penalty in binary mode
 planner_params.gamma = 0.2;  % preferred AGL penalty weight
 planner_params.preferred_agl = 40; % target altitude above terrain [m]
 planner_params.shadow_bias = 0.85;
+planner_params.use_parallel_rewire = false;
 planner_params.animate = cfg.rrt_live_animation;
 planner_params.plot_interval = cfg.rrt_live_plot_interval;
 

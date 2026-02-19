@@ -52,6 +52,7 @@ classdef terrain_mesh < handle
         cell_size       % [N_size, E_size] of each index cell
         N_vec           % Original N coordinate vector
         E_vec           % Original E coordinate vector
+        F_height        % Vectorized height interpolant for fast queries
     end
 
     methods
@@ -87,6 +88,13 @@ classdef terrain_mesh < handle
                 warning('terrain_mesh:SizeMismatch', ...
                     'Z matrix size [%d, %d] does not match grid vectors [%d, %d]. Attempting to continue...', ...
                     actual_size(1), actual_size(2), expected_size(1), expected_size(2));
+            end
+
+            % Fast vectorized height lookup for batch segment checks.
+            try
+                obj.F_height = griddedInterpolant({obj.E_vec, obj.N_vec}, Z, 'linear', 'nearest');
+            catch
+                obj.F_height = [];
             end
 
             % Create triangle mesh from grid
@@ -133,23 +141,31 @@ classdef terrain_mesh < handle
             % Get candidate triangles using spatial index
             candidate_tris = obj.get_candidate_triangles(origin, direction, max_range);
 
-            % Test each candidate triangle
             best_t = max_range;
             hit = false;
             tri_idx = 0;
 
-            for i = 1:length(candidate_tris)
-                tri = candidate_tris(i);
-                v0 = obj.vertices(obj.triangles(tri, 1), :)';
-                v1 = obj.vertices(obj.triangles(tri, 2), :)';
-                v2 = obj.vertices(obj.triangles(tri, 3), :)';
+            if ~isempty(candidate_tris)
+                % Vectorized triangle batch against one ray.
+                tri_rows = obj.triangles(candidate_tris, :); % [K x 3]
+                v0 = obj.vertices(tri_rows(:, 1), :)';       % [3 x K]
+                v1 = obj.vertices(tri_rows(:, 2), :)';
+                v2 = obj.vertices(tri_rows(:, 3), :)';
 
-                [tri_hit, t, ~, ~, ~] = moller_trumbore(origin, direction, v0, v1, v2);
+                k = numel(candidate_tris);
+                origin_batch = origin(:, ones(1, k));
+                direction_batch = direction(:, ones(1, k));
 
-                if tri_hit && t > 0 && t < best_t
-                    best_t = t;
+                [tri_hit, t_batch, ~, ~, ~] = moller_trumbore( ...
+                    origin_batch, direction_batch, v0, v1, v2);
+
+                valid = tri_hit & isfinite(t_batch) & (t_batch > 0) & (t_batch < max_range);
+                if any(valid)
+                    t_valid = t_batch(valid);
+                    cand_valid = candidate_tris(valid);
+                    [best_t, best_loc] = min(t_valid);
                     hit = true;
-                    tri_idx = tri;
+                    tri_idx = cand_valid(best_loc);
                 end
             end
 
@@ -178,18 +194,23 @@ classdef terrain_mesh < handle
             all_t = [];
             all_tri = [];
 
-            for i = 1:length(candidate_tris)
-                tri = candidate_tris(i);
-                v0 = obj.vertices(obj.triangles(tri, 1), :)';
-                v1 = obj.vertices(obj.triangles(tri, 2), :)';
-                v2 = obj.vertices(obj.triangles(tri, 3), :)';
+            if ~isempty(candidate_tris)
+                % Vectorized triangle batch against one ray.
+                tri_rows = obj.triangles(candidate_tris, :); % [K x 3]
+                v0 = obj.vertices(tri_rows(:, 1), :)';       % [3 x K]
+                v1 = obj.vertices(tri_rows(:, 2), :)';
+                v2 = obj.vertices(tri_rows(:, 3), :)';
 
-                [tri_hit, t, ~, ~, ~] = moller_trumbore(origin, direction, v0, v1, v2);
+                k = numel(candidate_tris);
+                origin_batch = origin(:, ones(1, k));
+                direction_batch = direction(:, ones(1, k));
 
-                if tri_hit && t > 0 && t < max_range
-                    all_t(end+1) = t;
-                    all_tri(end+1) = tri;
-                end
+                [tri_hit, t_batch, ~, ~, ~] = moller_trumbore( ...
+                    origin_batch, direction_batch, v0, v1, v2);
+
+                valid = tri_hit & isfinite(t_batch) & (t_batch > 0) & (t_batch < max_range);
+                all_t = t_batch(valid);
+                all_tri = candidate_tris(valid);
             end
 
             % Sort by distance
@@ -197,9 +218,10 @@ classdef terrain_mesh < handle
             tri_indices = all_tri(sort_idx);
 
             hits = length(distances);
-            points = zeros(3, hits);
-            for i = 1:hits
-                points(:, i) = origin + distances(i) * direction;
+            if hits > 0
+                points = origin + direction .* distances;
+            else
+                points = zeros(3, 0);
             end
         end
 
@@ -207,26 +229,33 @@ classdef terrain_mesh < handle
             %GET_HEIGHT Get terrain height at specified coordinates
             %   h = get_height(N, E)
             %
-            %   Uses ray casting from above to find terrain height.
+            %   Uses vectorized interpolation (fast path), with ray-cast fallback.
             %   Returns NaN for points outside terrain bounds.
 
             N = N(:);
             E = E(:);
             h = nan(size(N));
 
-            for i = 1:length(N)
-                if N(i) >= obj.bounds(1) && N(i) <= obj.bounds(2) && ...
-                   E(i) >= obj.bounds(3) && E(i) <= obj.bounds(4)
+            in_bounds = N >= obj.bounds(1) & N <= obj.bounds(2) & ...
+                        E >= obj.bounds(3) & E <= obj.bounds(4);
 
-                    % Cast ray from high altitude downward
-                    origin = [N(i); E(i); obj.bounds(6) + 1000];
-                    direction = [0; 0; -1];
+            if ~any(in_bounds)
+                return;
+            end
 
-                    [hit, point, ~, ~, ~] = obj.ray_intersect(origin, direction, 2000);
+            if ~isempty(obj.F_height)
+                h(in_bounds) = obj.F_height(E(in_bounds), N(in_bounds));
+                return;
+            end
 
-                    if hit
-                        h(i) = point(3);
-                    end
+            idx = find(in_bounds);
+            for k = 1:numel(idx)
+                i = idx(k);
+                origin = [N(i); E(i); obj.bounds(6) + 1000];
+                direction = [0; 0; -1];
+                [hit, point, ~, ~, ~] = obj.ray_intersect(origin, direction, 2000);
+                if hit
+                    h(i) = point(3);
                 end
             end
         end
@@ -417,46 +446,160 @@ classdef terrain_mesh < handle
         function candidates = get_candidate_triangles(obj, origin, direction, max_range)
             %GET_CANDIDATE_TRIANGLES Get triangles that ray might intersect
             %
-            % Uses 3D-DDA (Digital Differential Analyzer) to traverse grid cells
-            % along the ray path and collect candidate triangles.
+            % Uses 2D-DDA (Amanatides-Woo style) on the ray projection (N/E)
+            % to visit only crossed grid cells. This avoids sampling loops,
+            % unique/ismember scans, and repeated dynamic concatenation.
 
-            origin = origin(:)';
-            direction = direction(:)' / norm(direction(:));
+            candidates = zeros(1, 0);
+            if max_range <= 0
+                return;
+            end
 
-            % Collect unique triangles from cells along ray path
-            candidates = [];
-            visited_cells = [];
+            origin = origin(:);
+            direction = direction(:);
+            dir_norm = norm(direction);
+            if dir_norm < 1e-12
+                return;
+            end
+            direction = direction / dir_norm;
 
-            % Simple approach: sample along ray and collect cells
-            step = min(obj.cell_size) / 2;
-            n_steps = ceil(max_range / step);
+            N0 = origin(1);
+            E0 = origin(2);
+            dN = direction(1);
+            dE = direction(2);
 
-            for s = 0:n_steps
-                t = s * step;
-                point = origin + direction * t;
+            N_min = obj.bounds(1);
+            N_max = obj.bounds(2);
+            E_min = obj.bounds(3);
+            E_max = obj.bounds(4);
 
-                % Check if point is in bounds
-                if point(1) < obj.bounds(1) || point(1) > obj.bounds(2) || ...
-                   point(2) < obj.bounds(3) || point(2) > obj.bounds(4)
-                    continue;
+            eps_dir = 1e-12;
+
+            % Horizontal slab intersection against terrain XY bounds.
+            if abs(dN) < eps_dir
+                if N0 < N_min || N0 > N_max
+                    return;
+                end
+                tN_min = -inf;
+                tN_max = inf;
+            else
+                t1 = (N_min - N0) / dN;
+                t2 = (N_max - N0) / dN;
+                tN_min = min(t1, t2);
+                tN_max = max(t1, t2);
+            end
+
+            if abs(dE) < eps_dir
+                if E0 < E_min || E0 > E_max
+                    return;
+                end
+                tE_min = -inf;
+                tE_max = inf;
+            else
+                t1 = (E_min - E0) / dE;
+                t2 = (E_max - E0) / dE;
+                tE_min = min(t1, t2);
+                tE_max = max(t1, t2);
+            end
+
+            t_enter = max([0, tN_min, tE_min]);
+            t_exit = min([max_range, tN_max, tE_max]);
+            if ~(t_enter <= t_exit)
+                return;
+            end
+
+            % Initial DDA cell at horizontal entry point.
+            N_entry = N0 + t_enter * dN;
+            E_entry = E0 + t_enter * dE;
+            cell_N = obj.cell_size(1);
+            cell_E = obj.cell_size(2);
+
+            j = floor((N_entry - N_min) / cell_N) + 1; % N-axis column
+            i = floor((E_entry - E_min) / cell_E) + 1; % E-axis row
+
+            j = min(max(j, 1), obj.grid_size(2));
+            i = min(max(i, 1), obj.grid_size(1));
+
+            if abs(dN) < eps_dir
+                step_j = 0;
+                tMaxN = inf;
+                tDeltaN = inf;
+            elseif dN > 0
+                step_j = 1;
+                nextN = N_min + j * cell_N;
+                tMaxN = (nextN - N0) / dN;
+                tDeltaN = cell_N / abs(dN);
+            else
+                step_j = -1;
+                nextN = N_min + (j - 1) * cell_N;
+                tMaxN = (nextN - N0) / dN;
+                tDeltaN = cell_N / abs(dN);
+            end
+
+            if abs(dE) < eps_dir
+                step_i = 0;
+                tMaxE = inf;
+                tDeltaE = inf;
+            elseif dE > 0
+                step_i = 1;
+                nextE = E_min + i * cell_E;
+                tMaxE = (nextE - E0) / dE;
+                tDeltaE = cell_E / abs(dE);
+            else
+                step_i = -1;
+                nextE = E_min + (i - 1) * cell_E;
+                tMaxE = (nextE - E0) / dE;
+                tDeltaE = cell_E / abs(dE);
+            end
+
+            % Unique candidate collection with O(1) duplicate checks.
+            n_tris = size(obj.triangles, 1);
+            tri_seen = false(1, n_tris);
+            cap = 128;
+            candidates = zeros(1, cap, 'uint32');
+            n_candidates = 0;
+
+            t_curr = t_enter;
+            while i >= 1 && i <= obj.grid_size(1) && j >= 1 && j <= obj.grid_size(2) && t_curr <= t_exit
+                tri_list = obj.grid_index{i, j};
+                if ~isempty(tri_list)
+                    tri_list = tri_list(:).';
+                    add_mask = ~tri_seen(tri_list);
+                    if any(add_mask)
+                        new_tris = tri_list(add_mask);
+                        tri_seen(new_tris) = true;
+
+                        needed = n_candidates + numel(new_tris);
+                        if needed > cap
+                            while cap < needed
+                                cap = cap * 2;
+                            end
+                            candidates(cap) = uint32(0); %#ok<AGROW>
+                        end
+
+                        candidates((n_candidates + 1):needed) = uint32(new_tris);
+                        n_candidates = needed;
+                    end
                 end
 
-                % Get grid cell indices
-                j = floor((point(1) - obj.bounds(1)) / obj.cell_size(1)) + 1;
-                i = floor((point(2) - obj.bounds(3)) / obj.cell_size(2)) + 1;
-
-                j = max(1, min(obj.grid_size(2), j));
-                i = max(1, min(obj.grid_size(1), i));
-
-                cell_key = i * 10000 + j;
-                if ~ismember(cell_key, visited_cells)
-                    visited_cells(end+1) = cell_key;
-                    candidates = [candidates, obj.grid_index{i, j}];
+                if tMaxN < tMaxE
+                    t_curr = tMaxN;
+                    tMaxN = tMaxN + tDeltaN;
+                    j = j + step_j;
+                elseif tMaxE < tMaxN
+                    t_curr = tMaxE;
+                    tMaxE = tMaxE + tDeltaE;
+                    i = i + step_i;
+                else
+                    t_curr = tMaxN;
+                    tMaxN = tMaxN + tDeltaN;
+                    tMaxE = tMaxE + tDeltaE;
+                    j = j + step_j;
+                    i = i + step_i;
                 end
             end
 
-            % Remove duplicates
-            candidates = unique(candidates);
+            candidates = double(candidates(1:n_candidates));
         end
     end
 end

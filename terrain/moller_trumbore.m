@@ -1,107 +1,83 @@
 function [hit, t, u, v, intersection_point] = moller_trumbore(ray_origin, ray_dir, v0, v1, v2, epsilon)
-%MOLLER_TRUMBORE Ray-triangle intersection using Möller-Trumbore algorithm
+%MOLLER_TRUMBORE Vectorized Moller-Trumbore ray-triangle intersection.
 %
-% Computes the intersection of a ray with a triangle using the efficient
-% Möller-Trumbore algorithm. This is the industry-standard method for
-% ray-triangle intersection in computer graphics and simulation.
-%
-% Reference:
-%   Möller, T., & Trumbore, B. (1997). "Fast, minimum storage ray-triangle
-%   intersection." Journal of Graphics Tools, 2(1), 21-28.
-%
-% Inputs:
-%   ray_origin - [3x1] Ray starting point [x; y; z]
-%   ray_dir    - [3x1] Ray direction vector (should be normalized for t to be distance)
-%   v0, v1, v2 - [3x1] Triangle vertex positions in counter-clockwise order
-%   epsilon    - (optional) Tolerance for parallel detection (default: 1e-8)
+% Batch mode:
+% - ray_origin, ray_dir: [3 x N]
+% - v0, v1, v2: [3 x 1] or [3 x N]
+%   * [3 x 1] triangle inputs are broadcast to all rays.
+%   * [3 x N] triangle inputs are paired column-wise with rays.
 %
 % Outputs:
-%   hit        - true if ray intersects triangle
-%   t          - Distance along ray to intersection (ray_origin + t*ray_dir)
-%   u, v       - Barycentric coordinates of intersection point
-%                (point = (1-u-v)*v0 + u*v1 + v*v2)
-%   intersection_point - [3x1] The actual intersection point coordinates
+% - hit: [1 x N] logical
+% - t, u, v: [1 x N]
+% - intersection_point: [3 x N], NaN where hit is false
 %
-% Barycentric coordinates (u, v, w) where w = 1 - u - v:
-%   - w = weight for v0
-%   - u = weight for v1
-%   - v = weight for v2
-%   - Valid intersection: u >= 0, v >= 0, u + v <= 1
-%
-% Example:
-%   % Define a triangle
-%   v0 = [0; 0; 0];
-%   v1 = [1; 0; 0];
-%   v2 = [0; 1; 0];
-%
-%   % Ray from above, pointing down
-%   origin = [0.2; 0.2; 1];
-%   direction = [0; 0; -1];
-%
-%   [hit, t, u, v, point] = moller_trumbore(origin, direction, v0, v1, v2);
-%   % hit = true, t = 1, point = [0.2; 0.2; 0]
-%
-% See also: terrain_mesh, radar_ray_caster
+% Notes:
+% - No scalar per-ray loops or scalar if-branches are used.
+% - Validation is handled with logical masks.
 
-% Default epsilon
 if nargin < 6
     epsilon = 1e-8;
 end
 
-% Ensure column vectors
-ray_origin = ray_origin(:);
-ray_dir = ray_dir(:);
-v0 = v0(:);
-v1 = v1(:);
-v2 = v2(:);
+if size(ray_origin, 1) ~= 3 || size(ray_dir, 1) ~= 3 || ...
+   size(v0, 1) ~= 3 || size(v1, 1) ~= 3 || size(v2, 1) ~= 3
+    error('moller_trumbore:ShapeError', ...
+        'Inputs must have 3 rows: ray_origin, ray_dir, v0, v1, v2 are [3 x N].');
+end
 
-% Initialize outputs
-hit = false;
-t = inf;
-u = 0;
-v = 0;
-intersection_point = nan(3, 1);
+n_cols = max([size(ray_origin, 2), size(ray_dir, 2), size(v0, 2), size(v1, 2), size(v2, 2)]);
 
-% Edge vectors
+ray_origin = expand_to_n(ray_origin, n_cols, 'ray_origin');
+ray_dir = expand_to_n(ray_dir, n_cols, 'ray_dir');
+v0 = expand_to_n(v0, n_cols, 'v0');
+v1 = expand_to_n(v1, n_cols, 'v1');
+v2 = expand_to_n(v2, n_cols, 'v2');
+
 e1 = v1 - v0;
 e2 = v2 - v0;
 
-% Calculate determinant (cross product of direction and e2)
-p = cross(ray_dir, e2);
-det = dot(e1, p);
+% p = cross(ray_dir, e2, 1)
+p = cross(ray_dir, e2, 1);
+det = sum(e1 .* p, 1);
 
-% If determinant is near zero, ray lies in plane of triangle or is parallel
-if abs(det) < epsilon
-    return;
-end
+det_mask = abs(det) > epsilon;
 
-inv_det = 1.0 / det;
+inv_det = zeros(1, n_cols, 'like', det);
+inv_det(det_mask) = 1.0 ./ det(det_mask);
 
-% Calculate distance from v0 to ray origin
 tvec = ray_origin - v0;
+u = sum(tvec .* p, 1) .* inv_det;
 
-% Calculate u parameter and test bounds
-u = dot(tvec, p) * inv_det;
-if u < 0.0 || u > 1.0
-    return;
+q = cross(tvec, e1, 1);
+v = sum(ray_dir .* q, 1) .* inv_det;
+t = sum(e2 .* q, 1) .* inv_det;
+
+valid_mask = det_mask & (u >= 0.0) & (u <= 1.0) & ...
+             (v >= 0.0) & ((u + v) <= 1.0) & (t > epsilon);
+
+hit = valid_mask;
+
+t(~valid_mask) = inf;
+u(~valid_mask) = 0;
+v(~valid_mask) = 0;
+
+intersection_point = nan(3, n_cols);
+if any(valid_mask)
+    intersection_point(:, valid_mask) = ray_origin(:, valid_mask) + ...
+        ray_dir(:, valid_mask) .* t(valid_mask);
 end
 
-% Calculate v parameter and test bounds
-q = cross(tvec, e1);
-v = dot(ray_dir, q) * inv_det;
-if v < 0.0 || (u + v) > 1.0
-    return;
 end
 
-% Calculate t (distance along ray)
-t = dot(e2, q) * inv_det;
+function x = expand_to_n(x, n_cols, name)
+% Expand [3x1] -> [3xN], or validate [3xN].
 
-% Check if intersection is in positive ray direction
-if t > epsilon
-    hit = true;
-    intersection_point = ray_origin + t * ray_dir;
-else
-    t = inf;
+if size(x, 2) == 1 && n_cols > 1
+    x = x(:, ones(1, n_cols));
+elseif size(x, 2) ~= n_cols
+    error('moller_trumbore:BatchSizeMismatch', ...
+        '%s has %d columns; expected 1 or %d.', name, size(x, 2), n_cols);
 end
 
 end
