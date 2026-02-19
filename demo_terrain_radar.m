@@ -39,7 +39,8 @@ switch scenario
         terrain_params.resolution = 10;
         terrain_params.amplitude = 100;
         terrain_params.wavelength = 300;
-        terrain_data = terrain_generator('ridge', terrain_params);
+        terrain_params.type = 'ridge';
+        terrain_data = terrain_generator(terrain_params);
 
     case 'valley_flight'
         terrain_params.bounds = [0, 1000, -400, 400];
@@ -62,11 +63,6 @@ los = los_checker(tm);
 
 fprintf('  Terrain: %s, bounds: [%.0f, %.0f] x [%.0f, %.0f]\n', ...
     terrain_data.type, terrain_params.bounds);
-
-% Visualize terrain
-tm.plot();
-title(sprintf('Terrain: %s', scenario));
-drawnow;
 
 %% ==================== RADAR SETUP ====================
 
@@ -121,18 +117,6 @@ end
 fprintf('\nStep 3: Computing threat map...\n');
 threat.compute_map('max');
 
-% Visualize terrain (colored by elevation)
-figure('Name', 'Terrain Overview', 'Position', [100, 100, 900, 700]);
-tm.plot_2d();
-hold on;
-for i = 1:length(threat.radars)
-    radar = threat.radars{i};
-    plot(radar.position(1), radar.position(2), 'r^', ...
-        'MarkerSize', 10, 'MarkerFaceColor', 'r');
-end
-title(sprintf('Terrain Map: %s', scenario));
-drawnow;
-
 %% ==================== PATH PLANNING ====================
 
 fprintf('\nStep 4: Planning radar-aware path...\n');
@@ -152,16 +136,18 @@ switch scenario
         goal_pos = [950; 200; -(tm.get_height(950, 200) + 50)];
 end
 
-% RRT* parameters
-planner_params.max_iter = 3000;
-planner_params.step_size = 30;
-planner_params.goal_bias = 0.15;
-planner_params.rewire_radius = 80;
-planner_params.alpha = 1.0;        % Distance weight
-planner_params.beta = 1000;        % Radar cost weight (high for strong avoidance)
-planner_params.gamma = 0.5;        % Altitude cost weight (increased to encourage low flight)
-planner_params.min_clearance = 15; % 15m terrain clearance (reduced for terrain masking)
-planner_params.preferred_alt = 25; % Prefer low altitude for terrain masking (25m AGL)
+% RRT* parameters - TUNED for reliable path finding
+planner_params.max_iter = 5000;     % Increased for better convergence
+planner_params.step_size = 40;      % Slightly smaller for better resolution
+planner_params.goal_bias = 0.20;    % Increased from 0.15 for faster goal connection
+planner_params.rewire_radius = 80;  % Proportional to step size
+planner_params.alpha = 1.0;         % Distance weight
+planner_params.beta = 30;           % REDUCED from 100 - was causing path failure
+planner_params.gamma = 0.3;         % Altitude cost weight (moderate)
+planner_params.min_clearance = 15;  % 15m terrain clearance
+planner_params.preferred_alt = 30;  % Prefer low-moderate altitude for terrain masking
+planner_params.shadow_bias = 0.4;   % Reduced sampling bias for visible points
+planner_params.max_flight_alt = 400; % Maximum AGL altitude for sampling
 
 % Plan path
 [path_rrt, plan_info] = rrt_star_radar(start_pos, goal_pos, tm, threat, planner_params);
@@ -420,21 +406,21 @@ summary.mean_risk = mean_risk;
 
 fprintf('\n=== SUMMARY (copy to report table) ===\n');
 fprintf(['Scenario: %s\n', ...
-         'Waypoints: %d\n', ...
-         'Path length: %.1f m\n', ...
-         'Integrated risk: %.2f\n', ...
-         'Trajectory duration: %.1f s\n', ...
-         'Final error: %.2f m\n', ...
-         'Max error: %.2f m\n', ...
-         'RMS error: %.2f m\n', ...
-         'Min clearance: %.2f m\n', ...
-         'Mean clearance: %.2f m\n', ...
-         'Max detection prob.: %.3f\n', ...
-         'Mean detection prob.: %.3f\n'], ...
-         summary.scenario, summary.num_waypoints, summary.path_length_m, ...
-         summary.path_risk, summary.traj_duration_s, summary.final_error_m, ...
-         summary.max_error_m, summary.rms_error_m, summary.min_clearance_m, ...
-         summary.mean_clearance_m, summary.max_risk, summary.mean_risk);
+    'Waypoints: %d\n', ...
+    'Path length: %.1f m\n', ...
+    'Integrated risk: %.2f\n', ...
+    'Trajectory duration: %.1f s\n', ...
+    'Final error: %.2f m\n', ...
+    'Max error: %.2f m\n', ...
+    'RMS error: %.2f m\n', ...
+    'Min clearance: %.2f m\n', ...
+    'Mean clearance: %.2f m\n', ...
+    'Max detection prob.: %.3f\n', ...
+    'Mean detection prob.: %.3f\n'], ...
+    summary.scenario, summary.num_waypoints, summary.path_length_m, ...
+    summary.path_risk, summary.traj_duration_s, summary.final_error_m, ...
+    summary.max_error_m, summary.rms_error_m, summary.min_clearance_m, ...
+    summary.mean_clearance_m, summary.max_risk, summary.mean_risk);
 
 % Annotate plots with key metrics (kept short for readability)
 figure(findobj('Name', 'Path Planning Result'));
@@ -527,7 +513,7 @@ plot3(N_path(end), E_path(end), alt_path(end), 'rs', 'MarkerSize', 20, 'MarkerFa
 % Goal marker (target position) - larger and with label
 goal_alt = -waypoints_smooth(3, end); % Assuming waypoints(:, end) is the goal position
 plot3(waypoints_smooth(1, end), waypoints_smooth(2, end), goal_alt, 'mp', 'MarkerSize', 25, 'MarkerFaceColor', 'm', 'LineWidth', 3);
-text(waypoints_smooth(1, end), waypoints_smooth(2, end), goal_alt + 20, sprintf('GOAL\\n[%.0f, %.0f]', waypoints_smooth(1, end), waypoints_smooth(2, end)), ...
+text(waypoints_smooth(1, end), waypoints_smooth(2, end), goal_alt + 20, sprintf('GOAL \n[%.0f, %.0f]', waypoints_smooth(1, end), waypoints_smooth(2, end)), ...
     'FontSize', 14, 'FontWeight', 'bold', 'Color', 'magenta', 'HorizontalAlignment', 'center');
 
 % Start marker with label
@@ -554,7 +540,7 @@ for i = 1:length(threat.radars)
 
     % Add label
     text(radar.position(1), radar.position(2), radar.position(3) + 50, ...
-        sprintf('%s\\nR_{max}=%dm', radar.name, round(radar.R_max)), ...
+        sprintf('%s \nR_{max}=%dm', radar.name, round(radar.R_max)), ...
         'FontSize', 12, 'FontWeight', 'bold', 'Color', 'red', ...
         'HorizontalAlignment', 'center');
 end

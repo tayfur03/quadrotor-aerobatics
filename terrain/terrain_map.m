@@ -1,31 +1,31 @@
 classdef terrain_map < handle
-%TERRAIN_MAP Class for terrain height queries and visualization
-%
-% Provides efficient terrain height lookups using interpolation.
-% Can load from terrain_generator output or external DEM data.
-%
-% Properties:
-%   N_vec, E_vec  - Grid vectors
-%   Z             - Height matrix
-%   bounds        - [N_min, N_max, E_min, E_max]
-%   resolution    - Grid spacing
-%   interp_method - Interpolation method ('linear', 'cubic', 'spline')
-%
-% Methods:
-%   get_height(N, E)           - Get terrain height at point(s)
-%   get_height_and_normal(N,E) - Get height and surface normal
-%   get_clearance(N, E, alt)   - Get altitude above terrain
-%   is_underground(N, E, alt)  - Check if point is below terrain
-%   plot()                     - Visualize terrain
-%   plot_with_path(path)       - Plot terrain with flight path
-%
-% Example:
-%   terrain_data = terrain_generator('hills');
-%   tm = terrain_map(terrain_data);
-%   h = tm.get_height(100, 50);  % Height at N=100, E=50
-%   tm.plot();
-%
-% Author: Quadrotor Terrain Following Project
+    %TERRAIN_MAP Class for terrain height queries and visualization
+    %
+    % Provides efficient terrain height lookups using interpolation.
+    % Can load from terrain_generator output or external DEM data.
+    %
+    % Properties:
+    %   N_vec, E_vec  - Grid vectors
+    %   Z             - Height matrix
+    %   bounds        - [N_min, N_max, E_min, E_max]
+    %   resolution    - Grid spacing
+    %   interp_method - Interpolation method ('linear', 'cubic', 'spline')
+    %
+    % Methods:
+    %   get_height(N, E)           - Get terrain height at point(s)
+    %   get_height_and_normal(N,E) - Get height and surface normal
+    %   get_clearance(N, E, alt)   - Get altitude above terrain
+    %   is_underground(N, E, alt)  - Check if point is below terrain
+    %   plot()                     - Visualize terrain
+    %   plot_with_path(path)       - Plot terrain with flight path
+    %
+    % Example:
+    %   terrain_data = terrain_generator('hills');
+    %   tm = terrain_map(terrain_data);
+    %   h = tm.get_height(100, 50);  % Height at N=100, E=50
+    %   tm.plot();
+    %
+    % Author: Quadrotor Terrain Following Project
 
     properties
         N_vec           % North coordinate vector
@@ -51,8 +51,9 @@ classdef terrain_map < handle
                 interp_method = 'linear';
             end
 
-            obj.N_vec = terrain_data.N_vec;
-            obj.E_vec = terrain_data.E_vec;
+            % Ensure vectors are row vectors for consistency
+            obj.N_vec = terrain_data.N_vec(:)';
+            obj.E_vec = terrain_data.E_vec(:)';
             obj.Z = terrain_data.Z;
             obj.bounds = terrain_data.bounds;
             obj.resolution = terrain_data.resolution;
@@ -64,10 +65,44 @@ classdef terrain_map < handle
                 obj.type = 'unknown';
             end
 
+            % Ensure vectors are monotonically increasing
+            if obj.N_vec(1) > obj.N_vec(end)
+                obj.N_vec = flip(obj.N_vec);
+                obj.Z = flip(obj.Z, 2);  % Flip along N dimension (columns)
+            end
+            if obj.E_vec(1) > obj.E_vec(end)
+                obj.E_vec = flip(obj.E_vec);
+                obj.Z = flip(obj.Z, 1);  % Flip along E dimension (rows)
+            end
+
+            % griddedInterpolant expects Z of size [length(E_vec), length(N_vec)]
+            % where rows correspond to E and columns to N
+            expected_size = [length(obj.E_vec), length(obj.N_vec)];
+            actual_size = size(obj.Z);
+
+            % Check if Z needs to be transposed
+            if isequal(actual_size, flip(expected_size))
+                obj.Z = obj.Z';
+            elseif ~isequal(actual_size, expected_size)
+                error('terrain_map:SizeMismatch', ...
+                    'Z matrix size [%d, %d] does not match grid vectors [%d, %d]', ...
+                    actual_size(1), actual_size(2), expected_size(1), expected_size(2));
+            end
+
             % Create interpolant for fast queries
-            % Note: griddedInterpolant expects (row, col) = (E, N) ordering
-            obj.F_interp = griddedInterpolant({obj.E_vec, obj.N_vec}, obj.Z, ...
-                                               interp_method, 'nearest');
+            % griddedInterpolant({E_vec, N_vec}, Z) expects:
+            %   - E_vec and N_vec as row or column vectors (monotonically increasing)
+            %   - Z as size [length(E_vec), length(N_vec)]
+            %   - Query with F_interp(E, N) returns Z value
+            try
+                obj.F_interp = griddedInterpolant({obj.E_vec, obj.N_vec}, obj.Z, ...
+                    interp_method, 'nearest');
+            catch ME
+                % Fallback: create a wrapper using interp2
+                warning('terrain_map:InterpolantFallback', ...
+                    'griddedInterpolant failed (%s), using interp2 fallback.', ME.message);
+                obj.F_interp = [];  % Will use interp2 in get_height
+            end
         end
 
         function h = get_height(obj, N, E)
@@ -83,11 +118,21 @@ classdef terrain_map < handle
 
             % Check bounds
             in_bounds = N >= obj.bounds(1) & N <= obj.bounds(2) & ...
-                        E >= obj.bounds(3) & E <= obj.bounds(4);
+                E >= obj.bounds(3) & E <= obj.bounds(4);
 
             h = nan(size(N));
             if any(in_bounds)
-                h(in_bounds) = obj.F_interp(E(in_bounds), N(in_bounds));
+                if ~isempty(obj.F_interp)
+                    % Use griddedInterpolant (fast)
+                    h(in_bounds) = obj.F_interp(E(in_bounds), N(in_bounds));
+                else
+                    % Fallback to interp2
+                    % interp2 expects: interp2(X, Y, V, Xq, Yq)
+                    % where X corresponds to columns of V (N_vec)
+                    % and Y corresponds to rows of V (E_vec)
+                    h(in_bounds) = interp2(obj.N_vec, obj.E_vec, obj.Z, ...
+                        N(in_bounds), E(in_bounds), obj.interp_method);
+                end
             end
         end
 
@@ -175,28 +220,31 @@ classdef terrain_map < handle
             [N_grid, E_grid] = meshgrid(obj.N_vec, obj.E_vec);
 
             % Plot surface
-            surf(N_grid, E_grid, obj.Z, 'EdgeColor', 'none', 'FaceAlpha', 0.9);
+            surf(N_grid, E_grid, obj.Z, 'EdgeColor', 'none', 'FaceAlpha', 1.0); % Opaque for proper lighting
             hold on;
 
             % Formatting
             colormap(terrain_colormap());
-            % colorbar('Label', 'Elevation [m]');
-            % % Check if the colorbar was added successfully
-            % if isempty(findall(fig, 'Type', 'ColorBar'))
-            %     disp('Colorbar was not added successfully.');
-            % else
-            %     disp('Colorbar added successfully.');
-            % end
+
+            % Add colorbar (safely)
+            cb = colorbar;
+            cb.Label.String = 'Elevation [m]';
+
             xlabel('North [m]');
             ylabel('East [m]');
             zlabel('Height [m]');
-            title(sprintf('Terrain: %s', obj.type));
+            title(sprintf('Terrain: %s', obj.type), 'FontSize', 12, 'FontWeight', 'bold');
             axis equal;
             grid on;
             view(30, 45);
 
             % Add contour lines at base
             contour3(N_grid, E_grid, obj.Z, 15, 'k', 'LineWidth', 0.5);
+
+            % Add lighting for better 3D depth perception
+            light('Position', [-1 -1 1], 'Style', 'infinite');
+            lighting gouraud;
+            material dull; % Non-shiny surface looks more like terrain
         end
 
         function fig = plot_with_path(obj, path, fig_handle)
@@ -218,19 +266,19 @@ classdef terrain_map < handle
             E = path(2, :);
             alt = -path(3, :);  % Convert D to altitude above origin
 
-            % Plot path
-            plot3(N, E, alt, 'r-', 'LineWidth', 2);
+            % Plot path with shadow/curtain
+            plot3(N, E, alt, 'r-', 'LineWidth', 2.5);
 
             % Mark start and end
-            plot3(N(1), E(1), alt(1), 'go', 'MarkerSize', 15, 'MarkerFaceColor', 'g');
-            plot3(N(end), E(end), alt(end), 'r^', 'MarkerSize', 15, 'MarkerFaceColor', 'r');
+            plot3(N(1), E(1), alt(1), 'go', 'MarkerSize', 12, 'MarkerFaceColor', 'g');
+            plot3(N(end), E(end), alt(end), 'rs', 'MarkerSize', 12, 'MarkerFaceColor', 'r');
 
-            % Plot shadow on terrain
+            % Plot shadow on terrain (projected path)
             terrain_h = obj.get_height(N, E);
-            plot3(N, E, terrain_h, 'k--', 'LineWidth', 1);
+            plot3(N, E, terrain_h + 1, 'k--', 'LineWidth', 1.5); % +1m to avoid Z-fighting
 
             legend('Terrain', 'Contours', 'Flight Path', 'Start', 'End', 'Ground Track', ...
-                   'Location', 'best');
+                'Location', 'best');
         end
 
         function fig = plot_2d(obj, fig_handle)
@@ -243,9 +291,16 @@ classdef terrain_map < handle
 
             [N_grid, E_grid] = meshgrid(obj.N_vec, obj.E_vec);
 
-            contourf(N_grid, E_grid, obj.Z, 20);
+            % Fill contours
+            contourf(N_grid, E_grid, obj.Z, 20, 'LineStyle', 'none');
+            hold on;
+            % Add black contour lines for definition
+            contour(N_grid, E_grid, obj.Z, 20, 'k', 'LineWidth', 0.5);
+
             colormap(terrain_colormap());
-            %colorbar('Label', 'Elevation [m]');
+            cb = colorbar;
+            cb.Label.String = 'Elevation [m]';
+
             xlabel('North [m]');
             ylabel('East [m]');
             title(sprintf('Terrain Contour: %s', obj.type));
@@ -256,19 +311,26 @@ classdef terrain_map < handle
 end
 
 function cmap = terrain_colormap()
-    % Custom colormap for terrain visualization
-    % Green (low) -> Brown (mid) -> Gray (high) -> White (peaks)
-    colors = [
-        0.2, 0.5, 0.2;   % Dark green (valley)
-        0.4, 0.6, 0.3;   % Light green
-        0.6, 0.5, 0.3;   % Brown
-        0.5, 0.4, 0.3;   % Dark brown
-        0.6, 0.6, 0.6;   % Gray (rock)
-        0.8, 0.8, 0.8;   % Light gray
-        1.0, 1.0, 1.0;   % White (snow)
+% Custom colormap for terrain visualization
+% High contrast: Blue(water) -> Green(low info) -> Brown(mid) -> Gray(high) -> White(peak)
+
+% Control points (Normalized elevation 0.0 to 1.0)
+% We assume 0 is lowest and 1 is highest in the current view
+
+% Colors: [R G B]
+colors = [
+    0.2 0.4 0.8;   % Deep Blue (Water/Base)
+    0.1 0.6 0.2;   % Dark Green (Low vegetation)
+    0.4 0.8 0.4;   % Light Green (Grass)
+    0.8 0.7 0.4;   % Sand/Dirt
+    0.5 0.3 0.1;   % Dark Brown (Earth)
+    0.5 0.5 0.5;   % Gray (Rock)
+    0.9 0.9 0.9;   % White (Snow/Peak)
     ];
-    n_colors = 256;
-    x = linspace(0, 1, size(colors, 1));
-    xi = linspace(0, 1, n_colors);
-    cmap = interp1(x, colors, xi);
+
+% Create strictly interpolated map
+n_colors = 256;
+x = linspace(0, 1, size(colors, 1));
+xi = linspace(0, 1, n_colors);
+cmap = interp1(x, colors, xi, 'pchip'); % 'pchip' for smooth but vibrant transition
 end
