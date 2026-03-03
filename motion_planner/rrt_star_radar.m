@@ -23,7 +23,7 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
 
  rewire_radius_max = get_param(params, 'rewire_radius', base_step_size * 3);
  rewire_radius_min = get_param(params, 'rewire_radius_min', max(base_step_size * 1.2, 1.0));
- rewire_gamma_dyn = get_param(params, 'rewire_gamma_dyn', rewire_radius_max * 2.0);
+ rewire_gamma_dyn = get_param(params, 'rewire_gamma_dyn', rewire_radius_max * 4.0);
 
  spatial_dim = 3;
  rewire_mode_raw = get_param(params, 'rewire_mode', 'dynamic');
@@ -51,12 +51,28 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
  max_climb = get_param(params, 'max_climb', 30);
  max_descent = get_param(params, 'max_descent', 30);
  edge_sample_spacing = get_param(params, 'edge_sample_spacing', 10);
+ max_planning_time = get_param(params, 'max_planning_time', inf);
 
  shadow_bias = get_param(params, 'shadow_bias', 0.7);
  animate = get_param(params, 'animate', false);
  plot_interval = max(1, round(get_param(params, 'plot_interval', 200)));
  informed_sampling = get_param(params, 'informed_sampling', true);
  informed_max_attempts = max(10, round(get_param(params, 'informed_max_attempts', 100)));
+ height_query_mode_raw = get_param(params, 'height_query_mode', 'lut');
+ if isstring(height_query_mode_raw)
+     height_query_mode_raw = char(height_query_mode_raw);
+ end
+ if ~ischar(height_query_mode_raw)
+     height_query_mode_raw = 'lut';
+ end
+ height_query_mode = lower(height_query_mode_raw);
+ if ~ismember(height_query_mode, {'lut', 'mesh'})
+     warning('RRT*: Unknown height_query_mode="%s". Falling back to "lut".', height_query_mode);
+     height_query_mode = 'lut';
+ end
+ height_lut_resolution = get_param(params, 'height_lut_resolution', []);
+ height_lut_bounds = get_param(params, 'height_lut_bounds', []);
+ height_mesh_mode = get_param(params, 'height_mesh_mode', 'raycast');
 
  radar_hard_constraint = get_param(params, 'radar_hard_constraint', false);
  radar_visibility_threshold = get_param(params, 'radar_visibility_threshold', 0.5);
@@ -75,13 +91,44 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
  shortcut_min_index_gap = max(2, round(get_param(params, 'shortcut_min_index_gap', 2)));
 
  % Height source integration:
- % - default: terrain_map.get_height
- % - optional: params.terrain_mesh.get_height
- using_mesh_height = isfield(params, 'terrain_mesh') && ~isempty(params.terrain_mesh);
- if using_mesh_height
-     height_source = params.terrain_mesh;
- else
-     height_source = terrain;
+ % - mode='lut' : terrain_map LUT bilinear lookup
+ % - mode='mesh': terrain_mesh ray-cast precision lookup
+ mesh_obj = [];
+ if isfield(params, 'terrain_mesh') && ~isempty(params.terrain_mesh)
+     mesh_obj = params.terrain_mesh;
+ end
+ 
+ height_source = terrain;
+ using_mesh_height = false;
+ 
+ switch height_query_mode
+     case 'mesh'
+         if ~isempty(mesh_obj)
+             % Prefer terrain_map wrapper if available (keeps planner call path stable).
+             if ismethod(terrain, 'attach_mesh') && ismethod(terrain, 'set_height_query_mode')
+                 terrain.attach_mesh(mesh_obj);
+                 terrain.set_height_query_mode('mesh');
+                 height_source = terrain;
+                 using_mesh_height = false;
+             else
+                 height_source = mesh_obj;
+                 using_mesh_height = true;
+                 try
+                     height_source.height_query_mode = height_mesh_mode;
+                 catch
+                 end
+             end
+         else
+             warning('RRT*: height_query_mode="mesh" but params.terrain_mesh missing. Falling back to LUT.');
+             height_query_mode = 'lut';
+             if ismethod(terrain, 'set_height_query_mode')
+                 terrain.set_height_query_mode('lut');
+             end
+         end
+     otherwise
+         if ismethod(terrain, 'set_height_query_mode')
+             terrain.set_height_query_mode('lut');
+         end
  end
 
  mesh_const = [];
@@ -136,6 +183,19 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
 
  start = start(:);
  goal = goal(:);
+ 
+ % Initialize LUT once before iterative planning (mission-area cache).
+ if strcmp(height_query_mode, 'lut') && ismethod(terrain, 'initialize_height_lut')
+     lut_bounds_init = height_lut_bounds;
+     if isempty(lut_bounds_init)
+         lut_bounds_init = bounds(1:4);
+     end
+     try
+         terrain.initialize_height_lut(lut_bounds_init, height_lut_resolution);
+     catch ME
+         warning('RRT*: LUT initialization failed (%s). Using terrain_map default interpolation.', ME.message);
+     end
+ end
 
  % Optional live plotting handles
  anim_axes = [];
@@ -181,6 +241,8 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
 
  goal_reached = false;
  goal_node_idx = 0;
+ first_solution_iter = NaN;
+ first_solution_time = NaN;
  goal_tolerance = base_step_size;
 
  c_min = norm(goal - start);
@@ -212,7 +274,13 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
  end
 
  iter = 0;
+ terminated_by_time_limit = false;
  for iter = 1:max_iter
+     if toc >= max_planning_time
+         terminated_by_time_limit = true;
+         warning('RRT*: Stopping at iter %d due to max_planning_time=%.2fs.', iter, max_planning_time);
+         break;
+     end
      goal_updated_this_iter = false;
 
      c_best = inf;
@@ -407,6 +475,8 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
                     children{new_idx}(end+1) = goal_node_idx;
                     kd.pending = kd.pending + 1;
                     goal_reached = true;
+                    first_solution_iter = iter;
+                    first_solution_time = toc;
                     fprintf('Goal reached at iter %d! Cost: %.2f\n', iter, total_goal_cost);
                     goal_updated_this_iter = true;
                 end
@@ -494,12 +564,15 @@ function [path, info] = rrt_star_radar(start, goal, terrain, threat, params)
  path_length = compute_path_length(path);
  path_risk = compute_path_risk(path, threat);
 
- info.success = goal_reached;
- info.iterations = iter;
- info.tree_size = node_count;
- info.path_cost = final_cost;
- info.path_length = path_length;
- info.path_risk = path_risk;
+info.success = goal_reached;
+info.iterations = iter;
+info.tree_size = node_count;
+info.first_solution_iter = first_solution_iter;
+info.first_solution_time = first_solution_time;
+info.path_cost = final_cost;
+info.path_length = path_length;
+info.path_risk = path_risk;
+info.terminated_by_time_limit = terminated_by_time_limit;
  info.planning_time = planning_time;
  info.shortcut = shortcut_info;
 

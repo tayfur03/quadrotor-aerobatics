@@ -35,10 +35,27 @@ classdef terrain_map < handle
         resolution      % Grid resolution
         interp_method   % Interpolation method
         type            % Terrain type description
+        height_query_mode % 'lut' (default) or 'mesh'
     end
 
     properties (Access = private)
         F_interp        % Interpolant object for fast queries
+        mesh_source     % Optional terrain_mesh handle for high-precision queries
+
+        % Precomputed LUT (uniform grid, C++-friendly static 2D array layout)
+        lut_Z           % [nE x nN] heightmap
+        lut_N0          % LUT origin N
+        lut_E0          % LUT origin E
+        lut_dN          % LUT spacing in N
+        lut_dE          % LUT spacing in E
+        lut_inv_dN      % 1/lut_dN (precomputed for fast mapping)
+        lut_inv_dE      % 1/lut_dE (precomputed for fast mapping)
+        lut_nN          % Number of LUT columns (N dimension)
+        lut_nE          % Number of LUT rows (E dimension)
+        lut_num_rows    % Cached row count (= lut_nE) for manual linear indexing
+        lut_bounds      % [N_min N_max E_min E_max]
+        lut_ready       % True when LUT is initialized
+        height_mode_code % 1=luts, 2=mesh (fast dispatch in get_height)
     end
 
     methods
@@ -103,37 +120,139 @@ classdef terrain_map < handle
                     'griddedInterpolant failed (%s), using interp2 fallback.', ME.message);
                 obj.F_interp = [];  % Will use interp2 in get_height
             end
+
+            obj.mesh_source = [];
+            obj.height_query_mode = 'lut';
+            obj.height_mode_code = 1;
+            obj.lut_ready = false;
+            obj.initialize_height_lut();
         end
 
-        function h = get_height(obj, N, E)
+        function h = get_height(obj, N, E, mode)
             %GET_HEIGHT Get terrain height at specified coordinates
             %   h = get_height(N, E) - Returns height(s) at position(s)
+            %   h = get_height(N, E, mode) where mode is 'lut' or 'mesh'
             %
             %   N, E can be scalars, vectors, or matrices of same size.
             %   Returns NaN for points outside terrain bounds.
 
-            % Handle both scalar and array inputs
-            N = N(:);
-            E = E(:);
+            if ~isequal(size(N), size(E))
+                error('terrain_map:InputSizeMismatch', 'N and E must have the same size.');
+            end
 
-            % Check bounds
-            in_bounds = N >= obj.bounds(1) & N <= obj.bounds(2) & ...
-                E >= obj.bounds(3) & E <= obj.bounds(4);
-
-            h = nan(size(N));
-            if any(in_bounds)
-                if ~isempty(obj.F_interp)
-                    % Use griddedInterpolant (fast)
-                    h(in_bounds) = obj.F_interp(E(in_bounds), N(in_bounds));
+            if nargin < 4 || isempty(mode)
+                mode_code = obj.height_mode_code;
+            else
+                if isstring(mode)
+                    mode = char(mode);
+                end
+                if ~ischar(mode)
+                    error('terrain_map:UnknownHeightMode', ...
+                        'Unknown height mode type. Use ''lut'' or ''mesh''.');
+                end
+                mode_l = lower(mode);
+                if strcmp(mode_l, 'lut') || strcmp(mode_l, 'grid') || strcmp(mode_l, 'heightmap')
+                    mode_code = 1;
+                elseif strcmp(mode_l, 'mesh') || strcmp(mode_l, 'ray') || strcmp(mode_l, 'raycast')
+                    mode_code = 2;
                 else
-                    % Fallback to interp2
-                    % interp2 expects: interp2(X, Y, V, Xq, Yq)
-                    % where X corresponds to columns of V (N_vec)
-                    % and Y corresponds to rows of V (E_vec)
-                    h(in_bounds) = interp2(obj.N_vec, obj.E_vec, obj.Z, ...
-                        N(in_bounds), E(in_bounds), obj.interp_method);
+                    error('terrain_map:UnknownHeightMode', ...
+                        'Unknown height mode "%s". Use ''lut'' or ''mesh''.', mode);
                 end
             end
+
+            if mode_code == 1
+                h = obj.get_height_lut_impl(N, E);
+            else
+                h = obj.get_height_mesh_impl(N, E);
+            end
+        end
+
+        function set_height_query_mode(obj, mode)
+            %SET_HEIGHT_QUERY_MODE Set default mode used by get_height(N,E).
+            if isstring(mode)
+                mode = char(mode);
+            end
+            mode = lower(mode);
+            if strcmp(mode, 'lut')
+                obj.height_query_mode = mode;
+                obj.height_mode_code = 1;
+            elseif strcmp(mode, 'mesh')
+                obj.height_query_mode = mode;
+                obj.height_mode_code = 2;
+            else
+                error('terrain_map:UnknownHeightMode', ...
+                    'Unknown mode "%s". Use ''lut'' or ''mesh''.', mode);
+            end
+        end
+
+        function attach_mesh(obj, mesh_obj)
+            %ATTACH_MESH Attach terrain_mesh for high-precision mode.
+            obj.mesh_source = mesh_obj;
+        end
+
+        function initialize_height_lut(obj, mission_bounds, lut_resolution)
+            %INITIALIZE_HEIGHT_LUT Precompute uniform LUT for O(1) bilinear queries.
+            %   initialize_height_lut() uses full map bounds and native resolution.
+            %   initialize_height_lut([Nmin Nmax Emin Emax], [dN dE]) uses custom area/grid.
+
+            if nargin < 2 || isempty(mission_bounds)
+                mission_bounds = obj.bounds(1:4);
+            end
+            if nargin < 3 || isempty(lut_resolution)
+                dN = mean(diff(obj.N_vec));
+                dE = mean(diff(obj.E_vec));
+            else
+                if isscalar(lut_resolution)
+                    dN = lut_resolution;
+                    dE = lut_resolution;
+                else
+                    dN = lut_resolution(1);
+                    dE = lut_resolution(2);
+                end
+            end
+
+            if dN <= 0 || dE <= 0
+                error('terrain_map:InvalidLUTResolution', 'LUT resolution must be positive.');
+            end
+
+            N_min = max(obj.bounds(1), mission_bounds(1));
+            N_max = min(obj.bounds(2), mission_bounds(2));
+            E_min = max(obj.bounds(3), mission_bounds(3));
+            E_max = min(obj.bounds(4), mission_bounds(4));
+            if N_min >= N_max || E_min >= E_max
+                error('terrain_map:InvalidLUTBounds', ...
+                    'Mission bounds must overlap terrain bounds with non-zero area.');
+            end
+
+            N_lut = N_min:dN:N_max;
+            E_lut = E_min:dE:E_max;
+            if N_lut(end) < N_max
+                N_lut = [N_lut, N_max]; %#ok<AGROW>
+            end
+            if E_lut(end) < E_max
+                E_lut = [E_lut, E_max]; %#ok<AGROW>
+            end
+
+            [E_grid, N_grid] = ndgrid(E_lut, N_lut);
+            if ~isempty(obj.F_interp)
+                Z_lut = obj.F_interp(E_grid, N_grid);
+            else
+                Z_lut = interp2(obj.N_vec, obj.E_vec, obj.Z, N_grid, E_grid, obj.interp_method);
+            end
+
+            obj.lut_Z = Z_lut;
+            obj.lut_N0 = N_lut(1);
+            obj.lut_E0 = E_lut(1);
+            obj.lut_dN = N_lut(2) - N_lut(1);
+            obj.lut_dE = E_lut(2) - E_lut(1);
+            obj.lut_inv_dN = 1 / obj.lut_dN;
+            obj.lut_inv_dE = 1 / obj.lut_dE;
+            obj.lut_nN = numel(N_lut);
+            obj.lut_nE = numel(E_lut);
+            obj.lut_num_rows = obj.lut_nE;
+            obj.lut_bounds = [N_lut(1), N_lut(end), E_lut(1), E_lut(end)];
+            obj.lut_ready = true;
         end
 
         function [h, normal] = get_height_and_normal(obj, N, E)
@@ -306,6 +425,106 @@ classdef terrain_map < handle
             title(sprintf('Terrain Contour: %s', obj.type));
             axis equal;
             grid on;
+        end
+    end
+
+    methods (Access = private)
+        function h = get_height_lut_impl(obj, N, E)
+            % Fully vectorized bilinear interpolation on precomputed LUT.
+            if ~obj.lut_ready
+                obj.initialize_height_lut();
+            end
+
+            sz = size(N);
+            Nq = N(:);
+            Eq = E(:);
+            h = nan(size(Nq));
+
+            % Single vectorized bounds check before interpolation math.
+            valid = Nq >= obj.lut_bounds(1) & Nq <= obj.lut_bounds(2) & ...
+                    Eq >= obj.lut_bounds(3) & Eq <= obj.lut_bounds(4);
+            if ~any(valid)
+                h = reshape(h, sz);
+                return;
+            end
+
+            if obj.lut_nN < 2 || obj.lut_nE < 2
+                % Degenerate LUT fallback.
+                if ~isempty(obj.F_interp)
+                    h(valid) = obj.F_interp(Eq(valid), Nq(valid));
+                else
+                    h(valid) = interp2(obj.N_vec, obj.E_vec, obj.Z, ...
+                        Nq(valid), Eq(valid), obj.interp_method);
+                end
+                h = reshape(h, sz);
+                return;
+            end
+
+            use_all = all(valid);
+            if use_all
+                Nv = Nq;
+                Ev = Eq;
+            else
+                % Work only on valid points to minimize temporary allocations.
+                Nv = Nq(valid);
+                Ev = Eq(valid);
+            end
+
+            % Use reciprocal spacing to replace divisions with multiplies.
+            u = (Nv - obj.lut_N0) .* obj.lut_inv_dN + 1;
+            v = (Ev - obj.lut_E0) .* obj.lut_inv_dE + 1;
+
+            j0 = floor(u); % column index (N dimension)
+            i0 = floor(v); % row index (E dimension)
+            tx = u - j0;
+            ty = v - i0;
+
+            % Clamp once for boundary-safe bilinear access.
+            j0 = max(1, min(obj.lut_nN - 1, j0));
+            i0 = max(1, min(obj.lut_nE - 1, i0));
+            tx = max(0, min(1, tx));
+            ty = max(0, min(1, ty));
+
+            % Manual linear indexing (faster than sub2ind in this hot path):
+            % idx = (col-1)*numRows + row
+            base = (j0 - 1) * obj.lut_num_rows + i0;
+            idx11 = base;
+            idx12 = base + obj.lut_num_rows;
+            idx21 = base + 1;
+            idx22 = base + obj.lut_num_rows + 1;
+
+            z11 = obj.lut_Z(idx11);
+            z12 = obj.lut_Z(idx12);
+            z21 = obj.lut_Z(idx21);
+            z22 = obj.lut_Z(idx22);
+
+            % Bilinear interpolation (algebraically reduced form).
+            hv = z11 + tx .* (z12 - z11) + ty .* (z21 - z11) + ...
+                tx .* ty .* (z11 - z12 - z21 + z22);
+
+            if use_all
+                h = hv;
+            else
+                h(valid) = hv;
+            end
+
+            h = reshape(h, sz);
+        end
+
+        function h = get_height_mesh_impl(obj, N, E)
+            % Delegate to terrain_mesh precision query path.
+            if isempty(obj.mesh_source)
+                h = obj.get_height_lut_impl(N, E);
+                return;
+            end
+
+            try
+                h = obj.mesh_source.get_height(N, E, 'raycast');
+            catch
+                h = obj.mesh_source.get_height(N, E);
+            end
+
+            h = reshape(h, size(N));
         end
     end
 end

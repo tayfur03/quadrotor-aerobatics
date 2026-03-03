@@ -44,6 +44,7 @@ classdef terrain_mesh < handle
         n_rows          % Number of rows in original grid
         n_cols          % Number of columns in original grid
         grid_index      % Cell array for spatial acceleration
+        height_query_mode % 'lut' (default) or 'raycast'
     end
 
     properties (Access = private)
@@ -102,6 +103,7 @@ classdef terrain_mesh < handle
 
             % Build spatial acceleration index
             obj.build_spatial_index(index_cell_size);
+            obj.height_query_mode = 'lut';
 
             fprintf('Terrain mesh created: %d vertices, %d triangles\n', ...
                 size(obj.vertices, 1), size(obj.triangles, 1));
@@ -225,13 +227,25 @@ classdef terrain_mesh < handle
             end
         end
 
-        function h = get_height(obj, N, E)
+        function h = get_height(obj, N, E, mode)
             %GET_HEIGHT Get terrain height at specified coordinates
             %   h = get_height(N, E)
+            %   h = get_height(N, E, mode) where mode is:
+            %       'lut'     - fast interpolated lookup (default)
+            %       'raycast' - high-precision vertical ray cast per point
             %
             %   Uses vectorized interpolation (fast path), with ray-cast fallback.
             %   Returns NaN for points outside terrain bounds.
 
+            if nargin < 4 || isempty(mode)
+                mode = obj.height_query_mode;
+            end
+            if isstring(mode)
+                mode = char(mode);
+            end
+            mode = lower(mode);
+
+            sz = size(N);
             N = N(:);
             E = E(:);
             h = nan(size(N));
@@ -240,11 +254,13 @@ classdef terrain_mesh < handle
                         E >= obj.bounds(3) & E <= obj.bounds(4);
 
             if ~any(in_bounds)
+                h = reshape(h, sz);
                 return;
             end
 
-            if ~isempty(obj.F_height)
+            if ~isempty(obj.F_height) && ~ismember(mode, {'mesh', 'ray', 'raycast'})
                 h(in_bounds) = obj.F_height(E(in_bounds), N(in_bounds));
+                h = reshape(h, sz);
                 return;
             end
 
@@ -258,6 +274,8 @@ classdef terrain_mesh < handle
                     h(i) = point(3);
                 end
             end
+
+            h = reshape(h, sz);
         end
 
         function fig = plot(obj, show_wireframe)
