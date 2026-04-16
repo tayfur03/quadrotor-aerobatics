@@ -10,11 +10,9 @@ function test_trajectory_upgrades()
 
 clear; clc; close all;
 
-% Add paths
-addpath('terrain');
-addpath('radar');
-addpath('motion_planner');
-addpath('safety');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 fprintf('=== Verifying Radar Path Planning Upgrades ===\n\n');
 

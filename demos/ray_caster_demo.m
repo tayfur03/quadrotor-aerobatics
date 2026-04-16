@@ -1,7 +1,8 @@
 %% Radar Ray Caster class demo
-addpath("terrain")
-
 clear; clc; close all;
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 %terrain_data = terrain_generator(struct('type','canyon'));
 % Load normally
 dem_params.target_resolution = 30; 

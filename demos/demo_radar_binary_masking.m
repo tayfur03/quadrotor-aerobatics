@@ -10,9 +10,9 @@
 
 clear; clc; close all;
 
-addpath('terrain');
-addpath('radar');
-addpath('motion_planner');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 fprintf('=== Binary Radar Masking Demo ===\n');
 

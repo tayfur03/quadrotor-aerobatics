@@ -1,7 +1,9 @@
 % Test script for trajectory_smoother
 % Run this to diagnose issues with the minimum-snap trajectory generation
 
-addpath('motion_planner');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 %% Simple 3-waypoint test
 fprintf('=== Testing Trajectory Smoother ===\n\n');

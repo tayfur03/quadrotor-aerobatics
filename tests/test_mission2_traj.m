@@ -2,7 +2,9 @@
 % Run this to see exactly what's happening with RRT waypoints
 
 clear; clc; close all;
-addpath('motion_planner');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 %% Replicate Mission 2 Setup
 start_pos = [0; 0; -2];

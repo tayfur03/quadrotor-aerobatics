@@ -17,6 +17,9 @@
 % Based on: Tal & Karaman differential flatness control
 
 clear; clc; close all;
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 %% Select Maneuver
 fprintf('=== Aerobatic Maneuvers Demo ===\n\n');

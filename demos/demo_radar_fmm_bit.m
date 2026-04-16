@@ -15,9 +15,9 @@ clear; clc; close all;
 clear bit_star_planner compute_stealth_corridor;
 rehash;
 
-addpath('terrain');
-addpath('radar');
-addpath('motion_planner');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 fprintf('=== FMM Corridor + RRT* + BIT* Radar Demo ===\n');
 fprintf('Using bit_star_planner: %s\n', which('bit_star_planner'));
@@ -27,14 +27,14 @@ fprintf('Using compute_stealth_corridor: %s\n', which('compute_stealth_corridor'
 cfg = struct();
 cfg.profile = 'FAST';   % 'FAST' | 'ACCURATE'
 cfg.dem_file = 'DEM/agri.tif';
-cfg.dem_target_resolution = 50;
+cfg.dem_target_resolution = 20;
 cfg.dem_fill_nodata = 'nearest';
 cfg.dem_crop_half_size = 4000;
 cfg.use_mesh_los_threat = false;
 cfg.use_mesh_los_verify = true;
 cfg.mesh_los_eps = 0.75;
 cfg.threat_horiz_res = [];
-cfg.threat_vert_res = 40;
+cfg.threat_vert_res = 20;
 cfg.use_parallel_threat = true;
 cfg.skymap_gui = true;                    % Sliding SkyMap-style GUI
 cfg.skymap_mode = 'app';                  % 'app' | 'viewer'
@@ -190,7 +190,9 @@ threat_params.resolution = [threat_horiz_res, cfg.threat_vert_res];
 threat_params.alt_range = [terrain_min + 1, terrain_max + 300];
 
 threat = threat_map(tm, los_threat, 0.1, threat_params);
-radar_ne = select_radar_positions_demo(tm, cfg, cfg.num_radars);
+%radar_ne = select_radar_positions_demo(tm, cfg, cfg.num_radars);
+radar_ne = [tm.bounds(1) + 0.22 * N_span, tm.bounds(1) + 0.78 * N_span; ...
+            tm.bounds(3) + 0.25 * E_span, tm.bounds(3) + 0.72 * E_span];
 radar_range = max(500, 0.35 * diag_len);
 
 for r = 1:size(radar_ne, 2)

@@ -13,8 +13,9 @@
 
 clear; clc; close all;
 
-% Add motion_planner folder to path
-addpath('motion_planner');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 %% Initialize Parameters
 params = quad_params_indi();

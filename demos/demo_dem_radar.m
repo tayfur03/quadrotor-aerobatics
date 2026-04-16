@@ -31,10 +31,9 @@
 
 clear; clc; close all;
 
-%% Add paths
-addpath('terrain');
-addpath('radar');
-addpath('motion_planner');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 %% Configuration
 % Set this to your GeoTIFF file path, or leave empty for synthetic terrain

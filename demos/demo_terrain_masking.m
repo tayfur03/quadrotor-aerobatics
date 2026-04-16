@@ -13,11 +13,9 @@
 
 clear; clc; close all;
 
-%% Add paths
-addpath('terrain');
-addpath('radar');
-addpath('safety');
-addpath('motion_planner');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 %% ==================== SCENARIO SETUP ====================
 fprintf('=== Terrain Masking Demonstration ===\n');

@@ -16,10 +16,9 @@ clear; clc; close all;
 %% 1. Configuration & Setup
 fprintf('=== FINAL MISSION DEMO: STARTING ===\n\n');
 
-% Add paths
-addpath('terrain');
-addpath('radar');
-addpath('motion_planner');
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(fileparts(this_dir), 'project'));
+setup_project_paths();
 
 % Demo Parameters
 demo_params = struct();
