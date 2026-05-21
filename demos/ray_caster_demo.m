@@ -7,7 +7,7 @@ setup_project_paths();
 % Load normally
 dem_params.target_resolution = 30; 
 dem_params.fill_nodata = 'nearest';
-dem_params.dem_file = 'DEM/artvin.tif';
+dem_params.dem_file = 'DEM/agri.tif';
 terrain_data = dem_loader(dem_params.dem_file, dem_params);
 tm = terrain_map(terrain_data);
 

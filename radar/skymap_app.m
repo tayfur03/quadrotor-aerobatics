@@ -202,7 +202,7 @@ classdef skymap_app < handle
             btn_next.Layout.Column = 8;
 
             % Initial plots
-            obj.TopImg = imagesc(obj.TopAxes, obj.threat.N_vec, obj.threat.E_vec, ones(size(obj.terrain_h_grid)));
+            obj.TopImg = imagesc(obj.TopAxes, obj.threat.N_vec, obj.threat.E_vec, ones(size(obj.terrain_h_grid)), [1 3]);
             plot(obj.TopAxes, obj.path(1, :), obj.path(2, :), 'w-', 'LineWidth', 2.2);
             plot(obj.TopAxes, obj.start_pos(1), obj.start_pos(2), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'g');
             plot(obj.TopAxes, obj.goal_pos(1), obj.goal_pos(2), 'bs', 'MarkerSize', 8, 'MarkerFaceColor', 'b');
@@ -214,7 +214,7 @@ classdef skymap_app < handle
             obj.TopHeading = plot(obj.TopAxes, [obj.path(1,1), obj.path(1,1)], [obj.path(2,1), obj.path(2,1)], 'y-', 'LineWidth', 2.0);
 
             s0 = linspace(-obj.cfg.skymap_slice_half_length, obj.cfg.skymap_slice_half_length, obj.cfg.skymap_slice_n_horiz);
-            obj.VertImg = imagesc(obj.VertAxes, s0, obj.slice_alt_vec, 2 * ones(length(obj.slice_alt_vec), length(s0)));
+            obj.VertImg = imagesc(obj.VertAxes, s0, obj.slice_alt_vec, 2 * ones(length(obj.slice_alt_vec), length(s0)), [1 3]);
             obj.VertTerrain = plot(obj.VertAxes, s0, zeros(size(s0)), 'k-', 'LineWidth', 1.8);
             obj.VertCurr = plot(obj.VertAxes, 0, -obj.path(3,1), 'wo', 'MarkerSize', 7, 'MarkerFaceColor', 'y');
         end

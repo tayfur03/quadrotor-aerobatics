@@ -12,9 +12,20 @@ The repository has been grouped around usage:
 
 `project/setup_project_paths.m` is the shared bootstrap that adds project folders to the MATLAB path and resets the working directory to the repository root so existing relative DEM paths continue to work after moves.
 
-## Unnecessary Or Likely Unnecessary Code
+## Cleanup Notes
 
-Strong candidates:
+Removed from the active tree:
+
+- `motion_planner/generate_trajectory_sliding_window.m`
+  - Old trajectory-generation path.
+  - Only inbound active reference was the removed `tests/test_trajectory_upgrades.m`.
+  - Current demos use `trajectory_smoother` plus `optimize_time_allocation`.
+- `tests/test_trajectory_upgrades.m`
+  - Legacy validation script tied to the removed sliding-window trajectory generator.
+- `rewrite.py`
+  - One-off helper script with no inbound references from MATLAB code or docs.
+
+Previously identified cleanup candidates:
 
 - `placeholder.m`
   - No inbound references in the active repository.
@@ -37,7 +48,6 @@ Entrypoint-only files with zero inbound references:
 - `demos/ray_caster_demo.m`
 - `tests/test_mission2_traj.m`
 - `tests/test_trajectory_smoother.m`
-- `tests/test_trajectory_upgrades.m`
 
 These are not dead code by themselves. They are scripts or test entrypoints, so zero inbound references is expected.
 

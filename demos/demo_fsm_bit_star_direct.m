@@ -28,7 +28,7 @@ cfg.skymap_gui = true;
 cfg.skymap_mode = 'app';
 cfg.stealth_cost_alpha = 2.0;
 cfg.rng_seed = 7;
-cfg.strict_zero_risk = false;
+cfg.strict_zero_risk = true;
 cfg.fsm_max_sweeps = 96;
 cfg.fsm_tol = 1e-4;
 

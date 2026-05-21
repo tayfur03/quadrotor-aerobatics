@@ -122,6 +122,7 @@ classdef threat_map < handle
             %   compute_map('binary')- Deterministic visibility: 1 if visible
             %   compute_map(method, opts)
             %     opts.use_parallel - true/false, use parfor over altitude slices
+            %     opts.use_gpu - true/false, GPU vectorized binary map computation
             %     opts.show_progress - true/false progress prints (serial mode)
 
             if nargin < 2
@@ -132,6 +133,7 @@ classdef threat_map < handle
             end
 
             use_parallel = get_param(opts, 'use_parallel', false);
+            use_gpu = get_param(opts, 'use_gpu', false);
             show_progress = get_param(opts, 'show_progress', true);
             if use_parallel && ~can_use_parfor()
                 warning('threat_map:parforUnavailable', ...
@@ -164,6 +166,7 @@ classdef threat_map < handle
                 radar_enabled = false(1, n_rad);
                 radar_pos = zeros(3, n_rad);
                 radar_R2 = zeros(1, n_rad);
+                radar_range_model = cell(1, n_rad);
                 radar_az_limits = cell(1, n_rad);
                 radar_el_limits = cell(1, n_rad);
                 for r = 1:n_rad
@@ -171,6 +174,10 @@ classdef threat_map < handle
                     radar_enabled(r) = rd.enabled;
                     radar_pos(:, r) = rd.position(:);
                     radar_R2(r) = rd.R_max^2;
+                    radar_range_model{r} = 'sphere';
+                    if isprop(rd, 'range_model') && ~isempty(rd.range_model)
+                        radar_range_model{r} = rd.range_model;
+                    end
                     radar_az_limits{r} = rd.azimuth_limits;
                     radar_el_limits{r} = rd.elevation_limits;
                 end
@@ -180,6 +187,42 @@ classdef threat_map < handle
             [N_grid_2d, E_grid_2d] = meshgrid(obj.N_vec, obj.E_vec);
             terrain_h_2d = obj.terrain.get_height(N_grid_2d(:), E_grid_2d(:));
             terrain_h_2d = reshape(terrain_h_2d, [n_E, n_N]);
+
+            if use_gpu
+                if ~use_binary
+                    warning('threat_map:gpuUnsupportedMethod', ...
+                        'GPU threat-map computation currently supports binary maps only. Falling back to CPU.');
+                    use_gpu = false;
+                elseif ~can_use_gpu()
+                    warning('threat_map:gpuUnavailable', ...
+                        'Parallel Computing Toolbox GPU support or a compatible GPU is unavailable. Falling back to CPU.');
+                    use_gpu = false;
+                elseif ~isempty(obj.los) && isprop(obj.los, 'use_mesh') && obj.los.use_mesh
+                    warning('threat_map:gpuMeshLosUnsupported', ...
+                        'GPU threat-map computation does not support mesh LOS. Falling back to CPU.');
+                    use_gpu = false;
+                end
+            end
+
+            if use_gpu
+                fprintf('GPU threat-map computation enabled (binary LOS).\n');
+                try
+                    obj.risk_grid = compute_binary_map_gpu(obj, terrain_h_2d, ...
+                        radar_enabled, radar_pos, radar_R2, radar_range_model, ...
+                        radar_az_limits, radar_el_limits, show_progress);
+
+                    interp_method = 'nearest';
+                    obj.F_interp = griddedInterpolant({obj.E_vec, obj.N_vec, obj.alt_vec}, ...
+                                                       obj.risk_grid, interp_method, 'nearest');
+                    obj.computed = true;
+                    fprintf('Threat map computed.\n');
+                    return;
+                catch ME
+                    warning('threat_map:gpuFailed', ...
+                        'GPU threat-map computation failed (%s). Falling back to CPU.', ME.message);
+                    obj.risk_grid = zeros(n_E, n_N, n_alt);
+                end
+            end
 
             % Local broadcast variables for speed/parfor compatibility
             N_vec_local = obj.N_vec;
@@ -218,7 +261,11 @@ classdef threat_map < handle
                                     end
 
                                     rel = target_pos - radar_pos(:, r);
-                                    range2 = rel(1)^2 + rel(2)^2 + rel(3)^2;
+                                    if strcmpi(radar_range_model{r}, 'cylinder')
+                                        range2 = rel(1)^2 + rel(2)^2;
+                                    else
+                                        range2 = rel(1)^2 + rel(2)^2 + rel(3)^2;
+                                    end
                                     if range2 > radar_R2(r)
                                         continue;
                                     end
@@ -292,7 +339,11 @@ classdef threat_map < handle
                                     end
 
                                     rel = target_pos - radar_pos(:, r);
-                                    range2 = rel(1)^2 + rel(2)^2 + rel(3)^2;
+                                    if strcmpi(radar_range_model{r}, 'cylinder')
+                                        range2 = rel(1)^2 + rel(2)^2;
+                                    else
+                                        range2 = rel(1)^2 + rel(2)^2 + rel(3)^2;
+                                    end
                                     if range2 > radar_R2(r)
                                         continue;
                                     end
@@ -706,4 +757,129 @@ end
 function tf = can_use_parfor()
     tf = license('test', 'Distrib_Computing_Toolbox') && ...
          (exist('parfor', 'builtin') > 0 || exist('parfor', 'file') > 0);
+end
+
+function tf = can_use_gpu()
+    tf = false;
+    if ~license('test', 'Distrib_Computing_Toolbox') || exist('gpuDeviceCount', 'file') == 0
+        return;
+    end
+
+    try
+        tf = gpuDeviceCount('available') > 0;
+    catch
+        try
+            tf = gpuDeviceCount > 0;
+        catch
+            tf = false;
+        end
+    end
+end
+
+function risk_grid = compute_binary_map_gpu(obj, terrain_h_2d, radar_enabled, radar_pos, radar_R2, radar_range_model, radar_az_limits, radar_el_limits, show_progress)
+    n_N = length(obj.N_vec);
+    n_E = length(obj.E_vec);
+    n_alt = length(obj.alt_vec);
+    n_rad = length(obj.radars);
+    risk_grid = zeros(n_E, n_N, n_alt, 'single');
+
+    [N_grid_cpu, E_grid_cpu] = meshgrid(obj.N_vec, obj.E_vec);
+    N_grid = gpuArray(single(N_grid_cpu));
+    E_grid = gpuArray(single(E_grid_cpu));
+    terrain_target = gpuArray(single(terrain_h_2d));
+    terrain_N_vec = gpuArray(single(obj.terrain.N_vec(:)'));
+    terrain_E_vec = gpuArray(single(obj.terrain.E_vec(:)));
+    terrain_Z = gpuArray(single(obj.terrain.Z));
+
+    if ~isempty(obj.los) && isprop(obj.los, 'sample_spacing')
+        sample_spacing = obj.los.sample_spacing;
+        clearance = obj.los.clearance;
+    else
+        sample_spacing = obj.terrain.resolution;
+        clearance = 0;
+    end
+
+    progress_interval = max(1, floor(n_alt / 10));
+    for k = 1:n_alt
+        alt = single(obj.alt_vec(k));
+        visible_any = N_grid ~= N_grid;
+        below_terrain = alt < terrain_target;
+
+        for r = 1:n_rad
+            if ~radar_enabled(r)
+                continue;
+            end
+
+            rp = single(radar_pos(:, r));
+            dN = N_grid - rp(1);
+            dE = E_grid - rp(2);
+            dA = alt - rp(3);
+            if strcmpi(radar_range_model{r}, 'cylinder')
+                range2 = dN.^2 + dE.^2;
+                los_range2 = dN.^2 + dE.^2 + dA.^2;
+            else
+                range2 = dN.^2 + dE.^2 + dA.^2;
+                los_range2 = range2;
+            end
+            candidate = range2 <= single(radar_R2(r));
+            candidate = candidate & is_in_coverage_grid_gpu(dN, dE, dA, radar_az_limits{r}, radar_el_limits{r});
+            candidate = candidate & ~below_terrain;
+
+            if ~any(gather(candidate(:)))
+                continue;
+            end
+
+            if isempty(obj.los)
+                visible_r = candidate;
+            else
+                max_range = sqrt(max(gather(los_range2(candidate))));
+                n_samples = max(2, ceil(double(max_range) / sample_spacing) + 1);
+                t_vec = gpuArray(single(linspace(0, 1, n_samples)));
+
+                clear_los = N_grid == N_grid;
+                for s = 2:(n_samples - 1)
+                    t = t_vec(s);
+                    Ns = rp(1) + dN .* t;
+                    Es = rp(2) + dE .* t;
+                    As = rp(3) + dA .* t;
+                    Hs = interp2(terrain_N_vec, terrain_E_vec, terrain_Z, Ns, Es, 'linear', NaN);
+                    clear_los = clear_los & (As >= Hs + single(clearance));
+                end
+                visible_r = candidate & clear_los;
+            end
+
+            visible_any = visible_any | visible_r;
+        end
+
+        risk_slice = single(visible_any | below_terrain);
+        risk_grid(:, :, k) = gather(risk_slice);
+
+        if show_progress && (mod(k, progress_interval) == 0 || k == n_alt)
+            fprintf('  GPU progress: %d%%\n', round(100 * k / n_alt));
+        end
+    end
+
+    risk_grid = double(risk_grid);
+end
+
+function in_coverage = is_in_coverage_grid_gpu(dN, dE, dA, az_limits, el_limits)
+    in_coverage = dN == dN;
+    range_horiz = hypot(dN, dE);
+    azimuth = atan2d(dE, dN);
+    elevation = atan2d(dA, range_horiz);
+
+    if ~isempty(az_limits)
+        az_min = single(az_limits(1));
+        az_max = single(az_limits(2));
+        if az_min <= az_max
+            in_coverage = in_coverage & (azimuth >= az_min & azimuth <= az_max);
+        else
+            in_coverage = in_coverage & (azimuth >= az_min | azimuth <= az_max);
+        end
+    end
+
+    if ~isempty(el_limits)
+        in_coverage = in_coverage & ...
+            (elevation >= single(el_limits(1)) & elevation <= single(el_limits(2)));
+    end
 end

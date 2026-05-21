@@ -48,6 +48,15 @@ cfg.skymap_slice_half_length = 2500;      % [m] forward/backward span for vertic
 cfg.skymap_slice_n_horiz = 181;           % Horizontal samples in vertical slice
 cfg.skymap_slice_n_alt = 120;             % Altitude samples in vertical slice
 cfg.skymap_play_period = 0.15;            % [s] auto-play update period
+cfg.report_export_dir = '';               % Optional directory for figure export
+cfg.report_export_prefix = 'radar_binary_masking';
+
+if exist('cfg_override', 'var') && isstruct(cfg_override)
+    override_fields = fieldnames(cfg_override);
+    for k = 1:numel(override_fields)
+        cfg.(override_fields{k}) = cfg_override.(override_fields{k});
+    end
+end
 
 %% 1) Terrain (DEM or synthetic)
 use_dem = true;
@@ -338,7 +347,7 @@ fprintf('Inside sphere but terrain-masked (safe): %d\n', n_masked_in_range);
 fprintf('Visible waypoints (should be 0 in hard mode): %d\n', n_visible);
 
 %% 6) Visualization
-figure('Name', 'Binary Radar Masking - 3D', 'Position', [80, 80, 1200, 820]);
+fig_main = figure('Name', 'Binary Radar Masking - 3D', 'Position', [80, 80, 1200, 820]);
 tm.plot(); hold on;
 
 % Radar markers + coverage spheres
@@ -381,7 +390,7 @@ zlabel('Altitude [m]');
 title(sprintf('Hard Radar Constraint + Terrain Masking (%s)', terrain_label));
 
 % 2D visibility slice at median path altitude
-figure('Name', 'Binary Threat Slice', 'Position', [120, 120, 980, 760]);
+fig_slice = figure('Name', 'Binary Threat Slice', 'Position', [120, 120, 980, 760]);
 alt_slice = median(-path_rrt(3, :));
 [class_slice, alt_slice_used] = threat.get_binary_horizontal_slice(alt_slice, visibility_threshold, tm);
 
@@ -413,7 +422,7 @@ if cfg.skymap_gui
 end
 
 if traj_ok
-    figure('Name', 'Flatness Check', 'Position', [140, 140, 1000, 700]);
+    fig_flatness = figure('Name', 'Flatness Check', 'Position', [140, 140, 1000, 700]);
     subplot(2, 1, 1);
     plot(traj_poly.t, Omega_ref(1, :), 'r-', traj_poly.t, Omega_ref(2, :), 'g-', traj_poly.t, Omega_ref(3, :), 'b-', 'LineWidth', 1.3);
     grid on;
@@ -428,6 +437,17 @@ if traj_ok
     xlabel('Time [s]');
     title('Differential Flatness Angular Acceleration Feedforward');
     legend('dp/dt', 'dq/dt', 'dr/dt', 'Location', 'best');
+end
+
+if isfield(cfg, 'report_export_dir') && ~isempty(cfg.report_export_dir)
+    if ~exist(cfg.report_export_dir, 'dir')
+        mkdir(cfg.report_export_dir);
+    end
+    exportgraphics(fig_main, fullfile(cfg.report_export_dir, [cfg.report_export_prefix, '_3d.png']), 'Resolution', 220);
+    exportgraphics(fig_slice, fullfile(cfg.report_export_dir, [cfg.report_export_prefix, '_slice.png']), 'Resolution', 220);
+    if traj_ok && exist('fig_flatness', 'var')
+        exportgraphics(fig_flatness, fullfile(cfg.report_export_dir, [cfg.report_export_prefix, '_flatness.png']), 'Resolution', 220);
+    end
 end
 
 function radar_ne = select_radar_positions(tm, cfg, n_radars)

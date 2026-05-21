@@ -37,6 +37,7 @@ classdef radar_site < handle
         freq            % Frequency [Hz]
         lambda          % Wavelength [m]
         R_max           % Maximum range [m]
+        range_model     % 'sphere' uses 3D range, 'cylinder' uses horizontal range
         P_fa            % False alarm probability
         n_pulses        % Integrated pulses
         noise_figure    % Receiver noise figure [dB]
@@ -118,6 +119,7 @@ classdef radar_site < handle
             obj.G = get_param(params, 'G', default_G);
             obj.freq = get_param(params, 'freq', default_freq);
             obj.R_max = get_param(params, 'R_max', default_Rmax);
+            obj.range_model = get_param(params, 'range_model', 'sphere');
             obj.n_pulses = get_param(params, 'n_pulses', default_n_pulses);
             obj.P_fa = get_param(params, 'P_fa', 1e-6);
             obj.noise_figure = get_param(params, 'noise_figure', 5);  % 5 dB
@@ -138,7 +140,12 @@ classdef radar_site < handle
             %   P_r = (P_t * G^2 * lambda^2 * sigma) / ((4*pi)^3 * R^4)
 
             target_pos = target_pos(:);
-            R = norm(target_pos - obj.position);
+            rel = target_pos - obj.position;
+            if strcmpi(obj.range_model, 'cylinder')
+                R = norm(rel(1:2));
+            else
+                R = norm(rel);
+            end
 
             if R < 1  % Avoid singularity
                 R = 1;
@@ -181,7 +188,12 @@ classdef radar_site < handle
             target_pos = target_pos(:);
 
             % Check range
-            R = norm(target_pos - obj.position);
+            rel = target_pos - obj.position;
+            if strcmpi(obj.range_model, 'cylinder')
+                R = norm(rel(1:2));
+            else
+                R = norm(rel);
+            end
             if R > obj.R_max
                 P_det = 0;
                 return;

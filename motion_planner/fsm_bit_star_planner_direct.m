@@ -26,8 +26,17 @@ validateattributes(x_goal, {'numeric'}, {'real', 'vector', 'numel', 3}, mfilenam
 x_start = x_start(:);
 x_goal = x_goal(:);
 
-[terrain_input, terrain_query, radar_los_map, risk_query, vis_threshold, bounds, point_clearance, env_meta] = ...
-    parse_direct_env(env, params, x_start, x_goal);
+ctx = build_direct_planner_context(x_start, x_goal, env, params);
+terrain_input = ctx.terrain_input;
+terrain_query = ctx.terrain_query;
+radar_los_map = ctx.radar_los_map;
+risk_query = ctx.risk_query;
+bounds = ctx.bounds;
+point_clearance = ctx.point_clearance;
+env_meta = ctx.env_meta;
+risk_limit = ctx.risk_limit;
+altitude_cost_weight = ctx.altitude_cost_weight;
+preferred_agl = ctx.preferred_agl;
 
 meta = struct('fallback', true, 'fsm_time_s', 0, 'warmstart_cost', Inf, ...
     'warmstart_path', [], 'grid_x', [], 'grid_y', [], 'grid_z', [], ...
@@ -42,8 +51,12 @@ try
     if ~isfield(fsm_params, 'fsm_bounds_world')
         fsm_params.fsm_bounds_world = bounds;
     end
-    [T_fwd, T_bwd, ~, meta] = compute_fsm_heuristic( ...
-        terrain_input, radar_los_map, world_to_ned(x_start), world_to_ned(x_goal), fsm_params);
+    if get_opt(params, 'force_euclidean_heuristic', false)
+        meta.fallback = true;
+    else
+        [T_fwd, T_bwd, ~, meta] = compute_fsm_heuristic( ...
+            terrain_input, radar_los_map, ctx.world_to_ned(x_start), ctx.world_to_ned(x_goal), fsm_params);
+    end
 catch ME
     warning('fsm_bit_star_planner_direct:FSMError', ...
         'FSM preprocessing failed (%s). Falling back to Euclidean heuristic.', ME.message);
@@ -65,19 +78,12 @@ max_nodes = max(batch_size + 2, max_nodes);
 eps_global = min(max(eps_global, 0.0), 0.5);
 edge_check_samples = max(3, edge_check_samples);
 post_solution_batches = max(0, post_solution_batches);
-strict_zero_risk_tol = max(0, get_opt(params, 'strict_zero_risk_tol', 1e-6));
 
 default_goal_radius = max(5.0, 0.02 * norm(bounds([2 4 6]) - bounds([1 3 5])));
 goal_radius = get_opt(params, 'goal_radius', default_goal_radius);
 min_r = get_opt(params, 'min_connection_radius', max(5.0, 0.012 * norm(bounds([2 4 6]) - bounds([1 3 5]))));
 max_r = get_opt(params, 'max_connection_radius', max(40, 0.08 * norm(bounds([2 4 6]) - bounds([1 3 5]))));
 eta_radius = get_opt(params, 'eta_radius', 1.8);
-
-if isinf(stealth_weight)
-    risk_limit = strict_zero_risk_tol;
-else
-    risk_limit = vis_threshold;
-end
 
 nodes = nan(3, max_nodes);
 parents = zeros(1, max_nodes, 'uint32');
@@ -92,7 +98,8 @@ warmstart_bound_cost = Inf;
 warmstart_world = [];
 if ~meta.fallback && ~isempty(meta.warmstart_path)
     warmstart_world = [meta.warmstart_path(1, :); meta.warmstart_path(2, :); -meta.warmstart_path(3, :)];
-    warmstart_bound_cost = evaluate_world_path_cost(warmstart_world, risk_query, risk_limit, stealth_weight, point_clearance, terrain_query);
+    warmstart_bound_cost = evaluate_path_cost_strict(warmstart_world, bounds, risk_query, risk_limit, ...
+        terrain_query, point_clearance, edge_check_samples, stealth_weight, altitude_cost_weight, preferred_agl);
 end
 
 best_goal_cost = warmstart_bound_cost;
@@ -126,7 +133,7 @@ for batch_idx = 1:max_batches
     in_bounds = points_in_bounds(S_all, bounds);
     risk_all = risk_query(S_all);
     safe_mask = in_bounds & isfinite(risk_all) & (risk_all <= risk_limit);
-    safe_mask = safe_mask & points_clear_of_terrain(S_all, terrain_query, point_clearance);
+    safe_mask = safe_mask & ctx.points_clear_of_terrain(S_all);
 
     if isfinite(best_goal_cost)
         if ~meta.fallback
@@ -230,12 +237,13 @@ for batch_idx = 1:max_batches
 
     M = 0.5 * (P + C);
     risk_mid = reshape(risk_query(M), [], 1);
+    alt_cost = compute_altitude_edge_cost_batch(M, edge_len, terrain_query, altitude_cost_weight, preferred_agl);
     if isinf(stealth_weight)
         edge_penalty = inf(size(edge_len));
         edge_penalty(risk_mid <= risk_limit) = 0;
-        edge_w = edge_len + edge_penalty;
+        edge_w = edge_len + edge_penalty + alt_cost;
     else
-        edge_w = edge_len + stealth_weight .* edge_len .* max(risk_mid, 0);
+        edge_w = edge_len + stealth_weight .* edge_len .* max(risk_mid, 0) + alt_cost;
     end
     total_w = g_parent + edge_w;
 
@@ -299,12 +307,13 @@ for batch_idx = 1:max_batches
             rw_risk = reshape(risk_query(M_rw), [], 1);
             rw_len = reshape(D_rw(sub2ind(size(D_rw), new_local, ex_local)), [], 1);
             g_new = reshape(g_cost(new_abs), [], 1);
+            rw_alt_cost = compute_altitude_edge_cost_batch(M_rw, rw_len, terrain_query, altitude_cost_weight, preferred_agl);
             if isinf(stealth_weight)
                 rw_penalty = inf(size(rw_len));
                 rw_penalty(rw_risk <= risk_limit) = 0;
-                rw_cost = g_new + rw_len + rw_penalty;
+                rw_cost = g_new + rw_len + rw_penalty + rw_alt_cost;
             else
-                rw_cost = g_new + rw_len + stealth_weight .* rw_len .* max(rw_risk, 0);
+                rw_cost = g_new + rw_len + stealth_weight .* rw_len .* max(rw_risk, 0) + rw_alt_cost;
             end
 
             rw_mat = inf(numel(new_idx), numel(existing_idx));
@@ -342,12 +351,13 @@ for batch_idx = 1:max_batches
         goal_risk = reshape(risk_query(M_goal), [], 1);
         goal_len = reshape(D_goal(goal_candidates), [], 1);
         g_goal = reshape(g_cost(goal_candidates), [], 1);
+        goal_alt_cost = compute_altitude_edge_cost_batch(M_goal, goal_len, terrain_query, altitude_cost_weight, preferred_agl);
         if isinf(stealth_weight)
             goal_penalty = inf(size(goal_len));
             goal_penalty(goal_risk <= risk_limit) = 0;
-            goal_total = g_goal + goal_len + goal_penalty;
+            goal_total = g_goal + goal_len + goal_penalty + goal_alt_cost;
         else
-            goal_total = g_goal + goal_len + stealth_weight .* goal_len .* max(goal_risk, 0);
+            goal_total = g_goal + goal_len + stealth_weight .* goal_len .* max(goal_risk, 0) + goal_alt_cost;
         end
 
         better = goal_total < (best_goal_cost - 1e-9);
@@ -424,182 +434,48 @@ info.env = env_meta;
 cost = best_goal_cost;
 end
 
-function [terrain_input, terrain_query, radar_los_map, risk_query, vis_threshold, bounds, point_clearance, env_meta] = ...
-    parse_direct_env(env, params, x_start, x_goal)
-if ~isstruct(env)
-    error('fsm_bit_star_planner_direct:InvalidEnv', 'env must be a struct.');
-end
-
-point_clearance = max(get_opt(params, 'fsm_point_clearance', get_opt(params, 'min_clearance', 5.0)), 0.0);
-env_meta = struct();
-
-terrain_source = [];
-terrain_fields = {'terrain', 'terrain_map', 'fsm_terrain_map'};
-for i = 1:numel(terrain_fields)
-    if isfield(env, terrain_fields{i}) && ~isempty(env.(terrain_fields{i}))
-        terrain_source = env.(terrain_fields{i});
-        break;
-    end
-end
-if isempty(terrain_source)
-    error('fsm_bit_star_planner_direct:MissingTerrain', 'env must include terrain or terrain_map.');
-end
-
-terrain_input = terrain_source_to_struct(terrain_source, env);
-terrain_query = make_terrain_query(terrain_input);
-env_meta.terrain_bounds = [terrain_input.N_vec(1), terrain_input.N_vec(end), ...
-                           terrain_input.E_vec(1), terrain_input.E_vec(end)];
-
-if isfield(env, 'radar_los_map') && ~isempty(env.radar_los_map)
-    radar_los_map = logical(env.radar_los_map);
-elseif isfield(env, 'risk_grid') && ~isempty(env.risk_grid)
-    radar_los_map = [];
-else
-    error('fsm_bit_star_planner_direct:MissingThreat', ...
-        'env must include radar_los_map or risk_grid.');
-end
-
-if isfield(env, 'visibility_threshold') && ~isempty(env.visibility_threshold)
-    vis_threshold = env.visibility_threshold;
-else
-    vis_threshold = 0.5;
-end
-
-if ~isfield(env, 'N_vec') || ~isfield(env, 'E_vec') || ~isfield(env, 'alt_vec')
-    error('fsm_bit_star_planner_direct:MissingAxes', ...
-        'env must include N_vec, E_vec, and alt_vec.');
-end
-
-N_vec = env.N_vec(:)';
-E_vec = env.E_vec(:)';
-alt_vec = env.alt_vec(:)';
-
-if isfield(env, 'risk_grid') && ~isempty(env.risk_grid)
-    V = env.risk_grid;
-    if isequal(size(V), [numel(E_vec), numel(N_vec), numel(alt_vec)])
-        F = griddedInterpolant({E_vec, N_vec, alt_vec}, V, 'linear', 'none');
-        risk_query = @(P) reshape(F(P(2, :), P(1, :), P(3, :)), 1, []);
-        if isempty(radar_los_map)
-            radar_los_map = V > vis_threshold;
-        end
-    else
-        error('fsm_bit_star_planner_direct:RiskGridSizeMismatch', ...
-            'env.risk_grid size must match [numel(E_vec) x numel(N_vec) x numel(alt_vec)].');
-    end
-elseif ~isempty(radar_los_map)
-    if isequal(size(radar_los_map), [numel(E_vec), numel(N_vec), numel(alt_vec)])
-        V = double(radar_los_map);
-        F = griddedInterpolant({E_vec, N_vec, alt_vec}, V, 'nearest', 'none');
-        risk_query = @(P) reshape(F(P(2, :), P(1, :), P(3, :)), 1, []);
-    else
-        error('fsm_bit_star_planner_direct:LOSSizeMismatch', ...
-            'env.radar_los_map size must match [numel(E_vec) x numel(N_vec) x numel(alt_vec)].');
-    end
-end
-
-if isfield(env, 'bounds_world') && ~isempty(env.bounds_world)
-    bounds = env.bounds_world(:)';
-else
-    bounds = [N_vec(1), N_vec(end), E_vec(1), E_vec(end), alt_vec(1), alt_vec(end)];
-end
-
-bounds(1) = min([bounds(1), x_start(1), x_goal(1)]);
-bounds(2) = max([bounds(2), x_start(1), x_goal(1)]);
-bounds(3) = min([bounds(3), x_start(2), x_goal(2)]);
-bounds(4) = max([bounds(4), x_start(2), x_goal(2)]);
-bounds(5) = min([bounds(5), x_start(3), x_goal(3)]);
-bounds(6) = max([bounds(6), x_start(3), x_goal(3)]);
-
-env_meta.grid_size = [numel(N_vec), numel(E_vec), numel(alt_vec)];
-env_meta.bounds = bounds;
-end
-
-function terrain_input = terrain_source_to_struct(src, env)
-terrain_input = struct();
-if isa(src, 'terrain_map')
-    terrain_input.Z = src.Z;
-    terrain_input.N_vec = src.N_vec(:)';
-    terrain_input.E_vec = src.E_vec(:)';
-    terrain_input.dx = mean(diff(src.N_vec));
-    terrain_input.dy = mean(diff(src.E_vec));
-elseif isstruct(src)
-    terrain_input = src;
-    if ~isfield(terrain_input, 'N_vec') && isfield(terrain_input, 'x_vec')
-        terrain_input.N_vec = terrain_input.x_vec(:)';
-    end
-    if ~isfield(terrain_input, 'E_vec') && isfield(terrain_input, 'y_vec')
-        terrain_input.E_vec = terrain_input.y_vec(:)';
-    end
-    if ~isfield(terrain_input, 'dx') && isfield(terrain_input, 'N_vec')
-        terrain_input.dx = mean(diff(terrain_input.N_vec));
-    end
-    if ~isfield(terrain_input, 'dy') && isfield(terrain_input, 'E_vec')
-        terrain_input.dy = mean(diff(terrain_input.E_vec));
-    end
-else
-    error('fsm_bit_star_planner_direct:InvalidTerrainContext', ...
-        'Unsupported terrain source type: %s', class(src));
-end
-
-if isfield(env, 'alt_vec') && ~isempty(env.alt_vec)
-    terrain_input.alt_vec = env.alt_vec(:)';
-end
-terrain_input.x_vec = terrain_input.N_vec(:)';
-terrain_input.y_vec = terrain_input.E_vec(:)';
-end
-
-function F = make_terrain_query(terrain_input)
-N_vec = terrain_input.N_vec(:)';
-E_vec = terrain_input.E_vec(:)';
-Z = terrain_input.Z;
-if isequal(size(Z), [numel(E_vec), numel(N_vec)])
-    Z_NE = double(Z.');
-elseif isequal(size(Z), [numel(N_vec), numel(E_vec)])
-    Z_NE = double(Z);
-else
-    error('fsm_bit_star_planner_direct:TerrainSizeMismatch', ...
-        'terrain_input.Z size does not match terrain axes.');
-end
-F = griddedInterpolant({N_vec, E_vec}, Z_NE, 'linear', 'nearest');
-end
-
-function tf = points_clear_of_terrain(P, terrain_query, clearance)
-if isempty(P)
-    tf = false(1, 0);
-    return;
-end
-h = terrain_query(P(1, :).', P(2, :).');
-h = reshape(h, 1, []);
-tf = isfinite(h) & (P(3, :) >= (h + clearance));
-end
-
-function cost = evaluate_world_path_cost(path_world, risk_query, risk_limit, stealth_weight, point_clearance, terrain_query)
+function total_cost = evaluate_path_cost_strict(path_world, bounds, risk_query, risk_limit, terrain_query, point_clearance, edge_check_samples, stealth_weight, altitude_cost_weight, preferred_agl)
 if isempty(path_world) || size(path_world, 2) < 2
-    cost = Inf;
+    total_cost = Inf;
     return;
 end
 
-cost = 0;
+total_cost = 0;
 for i = 1:(size(path_world, 2) - 1)
     p0 = path_world(:, i);
     p1 = path_world(:, i + 1);
-    seg_mid = 0.5 * (p0 + p1);
-    seg_len = norm(p1 - p0);
-    if ~all(points_clear_of_terrain([p0, p1, seg_mid], terrain_query, point_clearance))
-        cost = Inf;
+    if ~edge_is_safe_batch(p0, p1, edge_check_samples, bounds, risk_query, risk_limit, terrain_query, point_clearance)
+        total_cost = Inf;
         return;
     end
+
+    seg_len = norm(p1 - p0);
+    seg_mid = 0.5 * (p0 + p1);
     risk_mid = risk_query(seg_mid);
     if ~isfinite(risk_mid) || risk_mid > risk_limit
-        cost = Inf;
+        total_cost = Inf;
         return;
     end
+    cost_alt = compute_altitude_edge_cost_batch(seg_mid, seg_len, terrain_query, altitude_cost_weight, preferred_agl);
+
     if isinf(stealth_weight)
-        cost = cost + seg_len;
+        total_cost = total_cost + seg_len + cost_alt;
     else
-        cost = cost + seg_len + stealth_weight * seg_len * max(risk_mid, 0);
+        total_cost = total_cost + seg_len + stealth_weight * seg_len * max(risk_mid, 0) + cost_alt;
     end
 end
+end
+
+function cost_alt = compute_altitude_edge_cost_batch(P, seg_len, terrain_query, altitude_cost_weight, preferred_agl)
+if altitude_cost_weight <= 0
+    cost_alt = zeros(size(seg_len));
+    return;
+end
+terrain_h = terrain_query(P(1, :).', P(2, :).');
+agl = P(3, :)' - terrain_h;
+agl_scale = max(preferred_agl, 1);
+err_norm = (agl - preferred_agl) ./ agl_scale;
+cost_alt = altitude_cost_weight .* seg_len .* (err_norm .^ 2);
 end
 
 function S = sample_uniform_bounds(bounds, n)
@@ -658,7 +534,9 @@ Pts = P0r .* (1 - T) + P1r .* T;
 Pts_flat = reshape(Pts, 3, []);
 inb = points_in_bounds(Pts_flat, bounds);
 risk = risk_query(Pts_flat);
-terrain_ok = points_clear_of_terrain(Pts_flat, terrain_query, point_clearance);
+h = terrain_query(Pts_flat(1, :).', Pts_flat(2, :).');
+h = reshape(h, 1, []);
+terrain_ok = isfinite(h) & (Pts_flat(3, :) >= (h + point_clearance));
 safe = inb & isfinite(risk) & (risk <= risk_limit) & terrain_ok;
 safe = reshape(safe, n_t, n_edges);
 ok = all(safe, 1);
@@ -742,10 +620,6 @@ c11 = (1 - tx) * c011 + tx * c111;
 c0 = (1 - ty) * c00 + ty * c10;
 c1 = (1 - ty) * c01 + ty * c11;
 val = (1 - tz) * c0 + tz * c1;
-end
-
-function x_ned = world_to_ned(x_world)
-x_ned = [x_world(1); x_world(2); -x_world(3)];
 end
 
 function t = get_meta_time(meta)

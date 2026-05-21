@@ -81,8 +81,12 @@ goal_radius = get_opt(params, 'goal_radius', default_goal_radius);
 min_r = get_opt(params, 'min_connection_radius', max(5.0, 0.20 * median(max(radii, 1e-3))));
 max_r = get_opt(params, 'max_connection_radius', max(max(radii), min_r * 2.0));
 eta_radius = get_opt(params, 'eta_radius', 1.8);
+visibility_query_mode = get_opt(params, 'visibility_query_mode', 'risk');
+altitude_cost_weight = get_opt(params, 'gamma', 0.0);
+preferred_agl = get_opt(params, 'preferred_agl', 50.0);
+terrain_query = make_optional_terrain_query(params, corridor);
 
-[risk_query, vis_threshold] = make_risk_query(corridor);
+[risk_query, vis_threshold] = make_risk_query(corridor, visibility_query_mode);
 if isinf(stealth_weight)
     risk_limit = strict_zero_risk_tol;
 else
@@ -176,13 +180,14 @@ for batch_idx = 1:max_batches
     edge_len = D(sub2ind(size(D), parent_local, sample_local));
     edge_len = reshape(edge_len, [], 1);
     risk_mid = reshape(risk_mid, [], 1);
+    edge_alt_cost = compute_altitude_edge_cost_batch(M, edge_len, terrain_query, altitude_cost_weight, preferred_agl);
     g_parent = reshape(g_cost(parent_local), [], 1);
     if isinf(stealth_weight)
         edge_penalty = inf(size(edge_len));
         edge_penalty(risk_mid <= risk_limit) = 0;
-        edge_w = edge_len + edge_penalty;
+        edge_w = edge_len + edge_penalty + edge_alt_cost;
     else
-        edge_w = edge_len + stealth_weight .* edge_len .* max(risk_mid, 0);
+        edge_w = edge_len + stealth_weight .* edge_len .* max(risk_mid, 0) + edge_alt_cost;
     end
     total_w = g_parent + edge_w;
 
@@ -250,13 +255,14 @@ for batch_idx = 1:max_batches
             rw_len = D_rw(sub2ind(size(D_rw), new_local, ex_local));
             rw_len = reshape(rw_len, [], 1);
             rw_risk = reshape(rw_risk, [], 1);
+            rw_alt_cost = compute_altitude_edge_cost_batch(M_rw, rw_len, terrain_query, altitude_cost_weight, preferred_agl);
             g_new = reshape(g_cost(new_abs), [], 1);
             if isinf(stealth_weight)
                 rw_penalty = inf(size(rw_len));
                 rw_penalty(rw_risk <= risk_limit) = 0;
-                rw_cost = g_new + rw_len + rw_penalty;
+                rw_cost = g_new + rw_len + rw_penalty + rw_alt_cost;
             else
-                rw_cost = g_new + rw_len + stealth_weight .* rw_len .* max(rw_risk, 0);
+                rw_cost = g_new + rw_len + stealth_weight .* rw_len .* max(rw_risk, 0) + rw_alt_cost;
             end
 
             rw_mat = inf(numel(new_idx), numel(existing_idx));
@@ -298,13 +304,14 @@ for batch_idx = 1:max_batches
         goal_len = D_goal(goal_candidates);
         goal_len = reshape(goal_len, [], 1);
         goal_risk = reshape(goal_risk, [], 1);
+        goal_alt_cost = compute_altitude_edge_cost_batch(M_goal, goal_len, terrain_query, altitude_cost_weight, preferred_agl);
         g_goal = reshape(g_cost(goal_candidates), [], 1);
         if isinf(stealth_weight)
             goal_penalty = inf(size(goal_len));
             goal_penalty(goal_risk <= risk_limit) = 0;
-            goal_total = g_goal + goal_len + goal_penalty;
+            goal_total = g_goal + goal_len + goal_penalty + goal_alt_cost;
         else
-            goal_total = g_goal + goal_len + stealth_weight .* goal_len .* max(goal_risk, 0);
+            goal_total = g_goal + goal_len + stealth_weight .* goal_len .* max(goal_risk, 0) + goal_alt_cost;
         end
 
         better = goal_total < (best_goal_cost - 1e-9);
@@ -382,7 +389,7 @@ bounds(5) = min([bounds(5), start(3), goal(3)]);
 bounds(6) = max([bounds(6), start(3), goal(3)]);
 end
 
-function [risk_query, vis_threshold] = make_risk_query(corridor)
+function [risk_query, vis_threshold] = make_risk_query(corridor, visibility_query_mode)
 vis_threshold = corridor.visibility_threshold;
 
 if isfield(corridor, 'grid') && isfield(corridor.grid, 'has_world_axes') && corridor.grid.has_world_axes
@@ -390,12 +397,99 @@ if isfield(corridor, 'grid') && isfield(corridor.grid, 'has_world_axes') && corr
     N_vec = corridor.grid.N_vec;
     alt_vec = corridor.grid.alt_vec;
     V = corridor.V;
-    F = griddedInterpolant({E_vec, N_vec, alt_vec}, V, 'linear', 'none');
+    interp_method = 'linear';
+    if strcmpi(visibility_query_mode, 'binary')
+        V = double(V > vis_threshold);
+        interp_method = 'nearest';
+    end
+    F = griddedInterpolant({E_vec, N_vec, alt_vec}, V, interp_method, 'none');
     risk_query = @(P) reshape(F(P(2, :), P(1, :), P(3, :)), 1, []);
 else
     V = corridor.V;
-    risk_query = @(P) reshape(interpn(V, P(1, :), P(2, :), P(3, :), 'linear', NaN), 1, []);
+    interp_method = 'linear';
+    if strcmpi(visibility_query_mode, 'binary')
+        V = double(V > vis_threshold);
+        interp_method = 'nearest';
+    end
+    risk_query = @(P) reshape(interpn(V, P(1, :), P(2, :), P(3, :), interp_method, NaN), 1, []);
 end
+end
+
+function terrain_query = make_optional_terrain_query(params, corridor)
+terrain_query = [];
+if isfield(params, 'terrain_query') && isa(params.terrain_query, 'function_handle')
+    terrain_query = params.terrain_query;
+    return;
+end
+
+terrain_source = [];
+terrain_fields = {'terrain_map', 'terrain'};
+for i = 1:numel(terrain_fields)
+    if isfield(params, terrain_fields{i}) && ~isempty(params.(terrain_fields{i}))
+        terrain_source = params.(terrain_fields{i});
+        break;
+    end
+end
+if isempty(terrain_source) && isfield(corridor, 'terrain_map') && ~isempty(corridor.terrain_map)
+    terrain_source = corridor.terrain_map;
+end
+if isempty(terrain_source)
+    return;
+end
+
+terrain_query = make_terrain_query_from_source(terrain_source);
+end
+
+function terrain_query = make_terrain_query_from_source(src)
+if isa(src, 'terrain_map')
+    N_vec = src.N_vec(:)';
+    E_vec = src.E_vec(:)';
+    Z = src.Z;
+elseif isstruct(src)
+    if isfield(src, 'N_vec')
+        N_vec = src.N_vec(:)';
+    elseif isfield(src, 'x_vec')
+        N_vec = src.x_vec(:)';
+    else
+        error('bit_star_planner:MissingNorthAxis', 'terrain source must include N_vec or x_vec.');
+    end
+    if isfield(src, 'E_vec')
+        E_vec = src.E_vec(:)';
+    elseif isfield(src, 'y_vec')
+        E_vec = src.y_vec(:)';
+    else
+        error('bit_star_planner:MissingEastAxis', 'terrain source must include E_vec or y_vec.');
+    end
+    if ~isfield(src, 'Z') || isempty(src.Z)
+        error('bit_star_planner:MissingTerrainZ', 'terrain source must include a non-empty Z field.');
+    end
+    Z = src.Z;
+else
+    error('bit_star_planner:InvalidTerrainSource', 'Unsupported terrain source type: %s', class(src));
+end
+
+if isequal(size(Z), [numel(E_vec), numel(N_vec)])
+    Z_NE = double(Z.');
+elseif isequal(size(Z), [numel(N_vec), numel(E_vec)])
+    Z_NE = double(Z);
+else
+    error('bit_star_planner:TerrainSizeMismatch', 'terrain source Z size does not match terrain axes.');
+end
+
+F = griddedInterpolant({N_vec, E_vec}, Z_NE, 'linear', 'nearest');
+terrain_query = @(N, E) F(N, E);
+end
+
+function cost_alt = compute_altitude_edge_cost_batch(P, seg_len, terrain_query, altitude_cost_weight, preferred_agl)
+if altitude_cost_weight <= 0 || isempty(terrain_query)
+    cost_alt = zeros(size(seg_len));
+    return;
+end
+terrain_h = terrain_query(P(1, :).', P(2, :).');
+agl = P(3, :)' - terrain_h;
+agl_scale = max(preferred_agl, 1);
+err_norm = (agl - preferred_agl) ./ agl_scale;
+cost_alt = altitude_cost_weight .* seg_len .* (err_norm .^ 2);
 end
 
 function S = sample_from_corridor_union(centers, radii, n)

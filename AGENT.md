@@ -6,19 +6,24 @@ This repository is a MATLAB quadrotor simulation and planning workspace. It comb
 
 - Differential-flatness trajectory generation and INDI-based control
 - Terrain-aware and radar-aware path planning
-- Demo scripts for missions, aerobatics, terrain masking, and FMM/BIT* radar planning
+- Radar threat-map and line-of-sight modeling
+- Script demos for missions, terrain masking, planner benchmarks, FMM/FSM/BIT*, and AIT* experiments
 
 Treat this as a script-driven MATLAB project rather than a packaged library.
 
 ## Repo Layout
 
-- `demos/`: primary entry points and interactive benchmark/demo scripts
-- `motion_planner/`: planners, corridor generation, smoothing, waypoint logic
-- `terrain/`: DEM loading, terrain meshes/maps, LOS checks, ray casting
-- `radar/`: radar models, threat maps, SkyMap visualization
-- `DEM/`: local terrain assets used by some demos
-- `backup_original/`: preserved older copies of original files
-- `CLAUDE.md`: useful project notes, but partially stale relative to newer radar/FMM/BIT* work
+- `demos/`: primary entry points and visual benchmark/demo scripts
+- `tests/`: lightweight validation and smoke-test scripts
+- `motion_planner/`: planners, corridor generation, path simplification, trajectory smoothing
+- `terrain/`: DEM loading, terrain maps/meshes, LOS checks, ray casting
+- `radar/`: radar models, threat maps, FMM/FSM heuristics, SkyMap visualization
+- `flight/`: dynamics, INDI control, differential flatness, aerobatic helpers
+- `math/`: quaternion and rotation helpers
+- `safety/`: CBF safety-filter prototype
+- `DEM/`: local terrain assets used by selected demos
+- `project/`: shared path bootstrap
+- `docs/`: repo notes and audits
 
 ## Primary Entry Points
 
@@ -29,32 +34,44 @@ Common scripts to run from the repo root in MATLAB:
 - `run('demos/demo_mission_2.m')`
 - `run('demos/demo_mission_3.m')`
 - `run('demos/demo_aerobatics.m')`
+- `run('demos/demo_radar_binary_masking.m')`
 - `run('demos/demo_radar_fmm_bit.m')`
+- `run('demos/demo_fsm_bit_star_direct.m')`
+- `run('demos/demo_ait_star_direct.m')`
 - `run('demos/demo_radar_planner_benchmark.m')`
 - `run('demos/final_mission_demo.m')`
 
 Smaller validation scripts:
 
 - `run('tests/test_trajectory_smoother.m')`
-- `run('tests/test_trajectory_upgrades.m')`
+- `run('tests/test_mission2_traj.m')`
+- `run('tests/test_ait_star_direct_smoke.m')`
 
 Prefer the smallest relevant script for validation before running the heavier demos.
+
+## Current Trajectory Flow
+
+The active planner-to-trajectory flow is:
+
+- planner path from `rrt_star_radar`, `fsm_bit_star_planner_direct`, `ait_star_planner_direct`, or related BIT* code
+- optional geometric cleanup with `simplify_path` or `smooth_path_geometric`
+- trajectory generation with `trajectory_smoother`
+- optional downstream flight/control visualization
+
+The old sliding-window trajectory generator has been removed. New work should use `trajectory_smoother` and `optimize_time_allocation`.
 
 ## MATLAB Conventions In This Repo
 
 - Top-level scripts usually begin with `clear; clc; close all;`.
-- Scripts manage their own paths with:
-  - `addpath('terrain')`
-  - `addpath('radar')`
-  - `addpath('motion_planner')`
-- Do not assume the MATLAB session already has the right paths loaded.
-- Preserve script-first workflows unless you are intentionally refactoring the full call chain.
+- Most scripts should call `setup_project_paths` or explicitly add the folders they use.
+- Do not assume a fresh MATLAB session already has project paths loaded.
+- Preserve script-first workflows unless intentionally refactoring the full call chain.
 
 ## Coordinate And Sign Conventions
 
 - The project uses NED coordinates.
 - Position is typically `[N; E; D]`.
-- Several planner/demo flows use negative Z to represent altitude in world/planner state.
+- Several planner/demo flows use negative Z/D values for altitude above terrain.
 - Terrain height, AGL, MSL, and planner altitude signs are easy to break silently.
 
 Before changing planner or demo math, trace the sign convention end-to-end.
@@ -63,12 +80,13 @@ Before changing planner or demo math, trace the sign convention end-to-end.
 
 Expected MATLAB functionality includes:
 
-- Core MATLAB scripting, plotting, and interpolation
-- Image Processing Toolbox for `bwdist` in corridor generation and `demo_radar_fmm_bit`
-- Statistics and Machine Learning Toolbox functions such as `createns`, `knnsearch`, and `rangesearch` in radar-aware planning
-- Parallel Computing Toolbox is optional; some threat-map code can use `parfor` but falls back to serial mode
+- Core MATLAB scripting, plotting, interpolation, and numeric routines
+- `minsnappolytraj` for minimum-snap trajectory generation
+- Image Processing Toolbox for `bwdist` in corridor and binary-mask flows
+- Statistics and Machine Learning Toolbox for `createns`, `knnsearch`, and `rangesearch`
+- Parallel Computing Toolbox is optional; some threat-map and planner code can use `parfor` but should fall back to serial mode
 
-Some demos depend on local DEM assets under `DEM/`. Newer scripts often fall back to synthetic terrain if a DEM is missing. Preserve that behavior.
+Some demos depend on local DEM assets under `DEM/`. Preserve synthetic-terrain fallback behavior where it exists.
 
 ## High-Risk Areas
 
@@ -81,6 +99,9 @@ Use extra care when editing:
 - `motion_planner/bit_star_planner.m`
   - depends on the `compute_stealth_corridor` output contract
   - has different behavior in weighted-risk vs strict-no-risk modes
+- `motion_planner/trajectory_smoother.m`
+  - depends on `minsnappolytraj` and `optimize_time_allocation`
+  - numerical conditioning can degrade with too many waypoints or long segment times
 - Demo scripts that convert between terrain height, AGL targets, and negative-down planner state
 
 Small logic changes in these files can affect both correctness and runtime.
@@ -89,17 +110,18 @@ Small logic changes in these files can affect both correctness and runtime.
 
 - Keep changes narrowly scoped.
 - Preserve NED and altitude sign conventions.
-- Preserve explicit `addpath(...)` usage unless you update every affected script.
-- Prefer graceful degradation when assets or toolboxes are unavailable.
-- Do not treat `CLAUDE.md` as the sole source of truth for the latest radar/FMM/BIT* flow.
+- Preserve graceful degradation when assets or toolboxes are unavailable.
+- Avoid reintroducing removed experimental helpers unless a current demo or test needs them.
+- Do not treat older generated notes as the sole source of truth for the latest radar/FMM/FSM/BIT*/AIT* flow.
 
 ## Validation Guidance
 
 After planner or trajectory changes, validate with the smallest relevant script first:
 
-- Smoothing/continuity changes: `test_trajectory_smoother`
-- Trajectory upgrade or planner-integration changes: `test_trajectory_upgrades`
-- Radar/FMM/BIT* changes: `demo_radar_fmm_bit`
-- End-to-end integrated behavior: `final_mission_demo`
+- Smoothing/continuity changes: `run('tests/test_trajectory_smoother.m')`
+- Mission trajectory changes: `run('tests/test_mission2_traj.m')`
+- AIT* direct planner changes: `run('tests/test_ait_star_direct_smoke.m')`
+- FSM/BIT* direct planner changes: `run('demos/demo_fsm_bit_star_direct.m')`
+- Broader radar planner behavior: `run('demos/demo_radar_planner_benchmark.m')`
 
-If a full demo is too expensive to run, at minimum document what you could not verify and why.
+If a full demo is too expensive to run, document what was not verified and why.
